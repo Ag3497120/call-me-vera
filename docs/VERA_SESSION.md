@@ -31,11 +31,42 @@ in two layers:
   recent rows here (plus active constraints/open contradictions) to build
   the PROJECT CONTEXT block `vera_session_start` returns.
 
+- **`control_log`** — what Vera decided *not* to save, and why: a
+  duplicate suppressed, a save skipped while paused, a pause/resume. Kept
+  separate from `event_log`'s content stream (adding a new row *type*
+  there would need a CHECK-constraint rebuild; a bookkeeping table
+  doesn't), also append-only, also merged by `sync()`.
+
+- **`session_control`** — one row, the pause switch (`vera pause` /
+  `vera resume`). Persists across a restart on purpose; deliberately
+  **not** carried by `sync()` — pausing is a local, per-store decision.
+
 Both/all authors point at the same file by default — no explicit sync
 needed while agents share a filesystem. `vera sync` merges two
 independently-grown stores for the case where they never did (a
 genuinely different machine); it's idempotent (a second sync is a no-op)
-and carries both the legacy tables and `event_log`.
+and carries the legacy tables, `event_log`, and `control_log`.
+
+### Duplicate detection
+
+Every `record_turn()` call computes
+`fingerprint = sha256(author, session_id, time_key, request, result)`,
+where `session_id` is generated fresh per `VeraStore` instance (one MCP
+server process run, or one CLI invocation — see the comment on
+`self.session_id` in [vera/store.py](../vera/store.py)) and `time_key` is
+the caller's own `model_timestamp` if it gave one, otherwise the server's
+receive time rounded to a 5-second bucket. A repeat of that exact
+fingerprint returns `{"duplicate_suppressed": true, "turn_id": <original>}`
+instead of inserting anything new, and the suppression itself is logged
+to `control_log` — so a gap is traceable, not a silent no-op.
+
+This deliberately dedups per *live connection*, not globally: two
+identical `vera record` CLI invocations run as separate processes (and
+thus separate `session_id`s) will **not** dedup against each other, even
+seconds apart. The problem this solves is an agent retrying a tool call
+within one running MCP server connection, not a human/script rerunning a
+command on purpose — see `vera_status`/`vera status` for what actually
+happened in the current process.
 
 ## Tools (MCP)
 
@@ -43,7 +74,9 @@ and carries both the legacy tables and `event_log`.
 |------|---------------|
 | `vera_guide(lang)` | full onboarding explanation, any supported language |
 | `vera_session_start(lang)` | **call this first, every session** — current interpretation, active constraints, open contradictions, recent decisions/changes/unresolved/results, plus the agent protocol |
-| `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang)` | **call this when the user says "Vera"** — the structured, append-only capture |
+| `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang, model_timestamp)` | **call this when the user says "Vera"** — the structured, append-only capture; a repeat within the same connection is auto-suppressed, not double-saved |
+| `vera_pause(by)` / `vera_resume(by)` | stop/restart `vera_record` saving content — use before a burst of activity you don't want recorded turn-by-turn |
+| `vera_status()` | live state: paused or not, last event, last suppression/pause decision, running counts |
 | `vera_add_interpretation(text, author, lang)` | standalone codebase-understanding snapshot, not tied to a turn |
 | `vera_get_interpretation(n)` | most recent interpretation snapshots, for comparing how understanding has shifted |
 | `vera_get_event_log(turn_id, type, k)` | raw event_log rows |

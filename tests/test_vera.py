@@ -205,10 +205,25 @@ def test_guide_all_languages_render():
         assert len(guide) >= 100, code
         assert "## start" not in guide, code
         assert len(state) >= 20, code
+        # Regression: this repo's CLI is flattened (`vera start`, `vera
+        # record`, ...) — the guide text was copy-pasted from the parent
+        # repo's `vera session <cmd>` phrasing during extraction and still
+        # told users to run commands that don't exist here, including two
+        # occurrences split across adjacent string literals that a naive
+        # single-line sed pass missed.
+        assert "vera session" not in guide, code
 
     assert resolve_lang("German") == "de"
     assert resolve_lang("Deutsch") == "de"
     assert resolve_lang("ドイツ語") == "de"
+    # Fallback substring matching: a whole phrase containing a language
+    # name/native word, not just a clean code, must still resolve —
+    # without the bare 2-letter codes falsely matching inside unrelated text.
+    assert resolve_lang("英語で開いて") == "en"
+    assert resolve_lang("in English please") == "en"
+    assert resolve_lang("auf Deutsch bitte") == "de"
+    assert resolve_lang("this is fine") == "en"  # contains "it"/"hi"-like fragments but no real match
+    assert resolve_lang("history of this") == "en"  # "hi" substring must NOT falsely match Hindi
     assert resolve_lang("日本語") == "ja"
     assert resolve_lang("totally-unknown-xyz") == "en"  # unknown falls back, never errors
 
@@ -229,3 +244,123 @@ def test_sync_carries_event_log(tmp_path):
 
     assert state["interpretation"] is not None
     assert state["interpretation"]["content"] == "B's understanding"
+
+
+def test_duplicate_turn_suppressed(store):
+    """An agent re-sending the exact same save (same author/session/
+    request/result, close in time) must not create a second event — the
+    original turn_id comes back with duplicate_suppressed=True, and the
+    decision itself is logged (not silently dropped)."""
+    r1 = store.record_turn(author="claude", request="fix DXF labels", result="fixed")
+    assert "duplicate_suppressed" not in r1
+
+    r2 = store.record_turn(author="claude", request="fix DXF labels", result="fixed")
+    assert r2["duplicate_suppressed"] is True
+    assert r2["turn_id"] == r1["turn_id"]
+    assert r2["event_ids"] == []
+
+    status = store.status()
+    assert status["duplicates_suppressed_total"] == 1
+    assert status["last_control"]["kind"] == "duplicate_suppressed"
+
+
+def test_different_content_not_suppressed(store):
+    """Same author/request but a genuinely different result must NOT be
+    treated as a duplicate — the fingerprint includes result, not just
+    request, so two distinct outcomes both get recorded."""
+    r1 = store.record_turn(author="claude", request="fix DXF labels", result="fixed via A")
+    r2 = store.record_turn(author="claude", request="fix DXF labels", result="fixed via B")
+    assert "duplicate_suppressed" not in r2
+    assert r1["turn_id"] != r2["turn_id"]
+
+
+def test_pause_blocks_recording_and_resume_restores_it(store):
+    """pause() must stop record_turn() from saving content (returning a
+    clear skipped marker, not silently succeeding), get_project_state()
+    must surface the paused state, and resume() must restore normal
+    recording — the "Vera pause" / bulk-agent-work scenario."""
+    assert store.get_project_state()["recording_paused"] is False
+
+    store.pause(by="local")
+    assert store.is_paused() is True
+    assert store.get_project_state()["recording_paused"] is True
+
+    result = store.record_turn(author="claude", request="should be skipped", result="n/a")
+    assert result == {"paused": True, "skipped": True}
+    assert store.status()["paused_skips_total"] == 1
+
+    store.resume(by="local")
+    assert store.is_paused() is False
+    assert store.get_project_state()["recording_paused"] is False
+
+    result2 = store.record_turn(author="claude", request="recorded after resume", result="done")
+    assert "paused" not in result2
+    assert "duplicate_suppressed" not in result2
+
+
+def test_event_log_schema_migration_from_pre_dedup_store(tmp_path):
+    """Opening a store created before the dedup/pause columns existed must
+    add them via ALTER TABLE (not require recreating the store), without
+    losing any pre-existing rows — the real upgrade path for every store
+    created before this feature landed."""
+    db_path = tmp_path / ".vera_store.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE events (
+            session_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL,
+            author TEXT NOT NULL CHECK(author IN ('claude','local')),
+            user_prompt TEXT, tool_calls TEXT, tool_results TEXT,
+            actions TEXT, observations TEXT, git_diff TEXT,
+            working_directory TEXT, created_at TEXT NOT NULL
+        );
+        CREATE TABLE event_log (
+            id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, ts TEXT NOT NULL,
+            author TEXT NOT NULL CHECK(author IN ('claude','local','vera')),
+            type TEXT NOT NULL, content TEXT NOT NULL, files TEXT,
+            lang TEXT NOT NULL DEFAULT 'en', created_at TEXT NOT NULL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO event_log (id, turn_id, ts, author, type, content, files, lang, created_at)"
+        " VALUES ('e1','t1','2020-01-01T00:00:00Z','local','request','pre-existing row','[]','en','2020-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = VeraStore(db_path)
+    try:
+        cols = {row[1] for row in store._conn.execute("PRAGMA table_info(event_log)")}
+        assert {"session_id", "model_timestamp", "received_at", "committed_at", "fingerprint"} <= cols
+        # pre-existing row survived the migration untouched
+        row = store._conn.execute("SELECT content FROM event_log WHERE id='e1'").fetchone()
+        assert row[0] == "pre-existing row"
+        # and the store is fully functional afterward
+        r = store.record_turn(author="claude", request="after migration", result="ok")
+        assert "duplicate_suppressed" not in r
+        assert store.status()["events_this_session"] >= 1
+    finally:
+        store.close()
+
+
+def test_sync_carries_control_log_and_new_event_log_columns(tmp_path):
+    """Regression: sync()'s event_log merge used a bare 9-placeholder
+    INSERT that would crash once the table grew the 5 dedup/timestamp
+    columns (mismatched column count). Must merge cleanly with named
+    columns, and control_log entries must cross too — pause state itself
+    (session_control) deliberately does not."""
+    a_path = tmp_path / "a" / ".vera_store.db"
+    b_path = tmp_path / "b" / ".vera_store.db"
+    a = init_store(a_path)
+    b = init_store(b_path)
+
+    b.record_turn(author="local", request="dup test", result="same")
+    b.record_turn(author="local", request="dup test", result="same")  # suppressed on B's side
+    assert b.status()["duplicates_suppressed_total"] == 1
+    b.close()
+
+    merged = a.sync(b_path)
+    a_status = a.status()
+    a.close()
+
+    assert merged["inserted"] == 1  # only the one real event, not the suppressed duplicate
+    assert a_status["duplicates_suppressed_total"] == 1  # control_log entry carried over

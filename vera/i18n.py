@@ -81,16 +81,38 @@ def _langs_str(lang: str) -> str:
     return sep.join(f"{code} ({name})" for code, name in SUPPORTED_LANGUAGES.items())
 
 
+# Fallback substring matching for resolve_lang(), used only when the exact
+# alias lookup misses — e.g. the caller passes a whole phrase like "英語で"
+# (Japanese "in English", with a trailing particle) or "in English please"
+# rather than a clean code/name. Deliberately excludes the bare ISO codes
+# ("en", "ja", "it", "hi", ...) and anything under 3 characters: those are
+# too short to substring-match safely — "it" or "hi" turn up constantly
+# inside unrelated English text ("is it done", "hi there"). Full names in
+# any script (English/native) are safe: "german"/"deutsch"/"ドイツ語" don't
+# collide with unrelated text the way 2-letter codes do.
+_ISO_CODES = set(SUPPORTED_LANGUAGES.keys())
+_FUZZY_LANG_CANDIDATES = sorted(
+    (alias for alias in _LANG_ALIASES if alias not in _ISO_CODES and len(alias) >= 3),
+    key=len, reverse=True,  # longest first, so "japanese" wins over any shorter overlap
+)
+
+
 def resolve_lang(requested: Optional[str]) -> str:
-    """Normalize a code or language name to a supported code; 'auto' or
-    anything unrecognized falls back to DEFAULT_LANG rather than erroring —
-    a guide in the wrong-but-known language beats a crash."""
+    """Normalize a code, language name, or a whole phrase containing one
+    ("英語で", "in English please", "auf Deutsch") to a supported code;
+    'auto' or anything unrecognized falls back to DEFAULT_LANG rather than
+    erroring — a guide in the wrong-but-known language beats a crash."""
     if not requested:
         return DEFAULT_LANG
     key = requested.strip().lower()
     if key in ("auto", ""):
         return DEFAULT_LANG
-    return _LANG_ALIASES.get(key, DEFAULT_LANG)
+    if key in _LANG_ALIASES:
+        return _LANG_ALIASES[key]
+    for alias in _FUZZY_LANG_CANDIDATES:
+        if alias in key:
+            return _LANG_ALIASES[alias]
+    return DEFAULT_LANG
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +133,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "At the start of a session, call vera_session_start (CLI: "
-            "`vera session start`) BEFORE doing any work. It returns the "
+            "`vera start`) BEFORE doing any work. It returns the "
             "project's current state: the latest interpretation of the "
             "codebase, active constraints, open contradictions, and recent "
             "decisions/changes/unresolved items. Read it before you touch "
@@ -119,7 +141,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "record": (
             "When the user says \"Vera\", record the turn with vera_record "
-            "(CLI: `vera session record`). Distill the conversation into: "
+            "(CLI: `vera record`). Distill the conversation into: "
             "REQUEST (what was asked), CHANGE (what you did, and which files), "
             "REASON (why you structured it that way), RESULT (what happened), "
             "STATE (your current understanding of the codebase). Also say the "
@@ -133,10 +155,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Distinguish observation, decision, assumption, and result — never record a guess as if it were a fact.",
             "Never overwrite a past event. Vera's event log is append-only by design; correct forward, don't rewrite history.",
             "When the user says \"Vera\" mid-conversation, that means: save what happened, AND explain your current understanding of the codebase to the user.",
+            "Recognize \"Vera\"/\"vera\" as the trigger in any case and anywhere in the message — \"Vera guide\", \"vera guide\", \"open Vera guide in German\", 「現在のVera guideを見せて」 all count, not just an exact match; if the message names a language, use it for that call, otherwise default to the conversation's current language.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Ask for the guide in another language and Vera answers in it — "
@@ -152,13 +175,13 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "読むことで、直前の作業をそのまま引き継げます — Claude → Vera → Local → Vera → Claude。"
         ),
         "start": (
-            "セッション開始時、作業を始める前に vera_session_start（CLI: `vera session start`）"
+            "セッション開始時、作業を始める前に vera_session_start（CLI: `vera start`）"
             "を必ず呼んでください。プロジェクトの現在状態 — コードベースの最新の解釈、"
             "有効な制約、未解決の矛盾、直近の決定・変更・未解決事項 — が返されます。"
             "何かに触れる前に必ず読んでください。"
         ),
         "record": (
-            "ユーザーが「Vera」と言ったら、vera_record（CLI: `vera session record`）で"
+            "ユーザーが「Vera」と言ったら、vera_record（CLI: `vera record`）で"
             "そのやり取りを記録してください。会話を REQUEST（何を求められたか）、"
             "CHANGE（何をしたか、どのファイルか）、REASON（なぜその構造にしたか）、"
             "RESULT（何が起きたか）、STATE（コードベースを現在どう解釈しているか）に"
@@ -172,10 +195,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "観察（observation）・決定（decision）・仮定（assumption）・結果（result）を区別すること。推測を事実として記録しないこと。",
             "過去のイベントを絶対に上書きしないこと。Veraのイベントログは設計上追記専用。訂正は前進させて記録する（履歴の書き換えはしない）。",
             "会話の途中でユーザーが「Vera」と言ったら、それは『今の作業内容を保存し、コードベースの現在の解釈をユーザーに説明する』という意味。",
+            "「Vera」「vera」は大文字小文字を問わず、メッセージ中のどこにあってもトリガーとして認識すること（「Vera guide」「vera guide」「現在のVera guideを見せて」「ドイツ語でVera guideを起動して」すべて該当）。メッセージ内で言語が指定されていればその言語で、指定がなければ会話中の現在の言語をデフォルトにすること。",
         ],
         "commands": (
-            "vera session start ・ vera session record ・ vera session guide [--lang xx] ・ "
-            "vera session search <query> ・ vera session check --action <a>"
+            "vera start ・ vera record ・ vera guide [--lang xx] ・ "
+            "vera search <query> ・ vera check --action <a> ・ vera pause / vera resume ・ vera status"
         ),
         "switch": (
             "他の言語でガイドを見たいときは、そう伝えるだけで構いません（例:"
@@ -192,12 +216,12 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "会话开始时，在开始任何工作之前先调用 vera_session_start"
-            "（CLI：`vera session start`）。它会返回项目当前状态：对代码库的最新理解、"
+            "（CLI：`vera start`）。它会返回项目当前状态：对代码库的最新理解、"
             "生效中的约束、尚未解决的矛盾，以及最近的决策/变更/未解决事项。"
             "动手之前请先读完。"
         ),
         "record": (
-            "当用户说“Vera”时，用 vera_record（CLI：`vera session record`）记录这次交互。"
+            "当用户说“Vera”时，用 vera_record（CLI：`vera record`）记录这次交互。"
             "把对话提炼为：REQUEST（被要求做什么）、CHANGE（做了什么、涉及哪些文件）、"
             "REASON（为什么这样设计）、RESULT（发生了什么）、STATE（你目前对代码库的理解）。"
             "STATE部分也要在回复里对用户说出来 —— Vera不会旁听对话，只记录你明确告诉它的内容。"
@@ -209,10 +233,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "区分 observation（观察）、decision（决定）、assumption（假设）、result（结果）—— 不要把猜测当作事实记录。",
             "绝不覆盖过去的事件。Vera的事件日志按设计仅可追加；有修正就继续追加新记录，不要改写历史。",
             "对话中用户说“Vera”，意味着：保存刚才发生的事，并向用户说明你目前对代码库的理解。",
+            "无论大小写，无论出现在消息的哪个位置，都要把“Vera”/“vera”识别为触发词（“Vera guide”“vera guide”“用德语打开Vera guide”“显示当前的Vera guide”均算数），不要求完全匹配；消息中指明了语言就用该语言调用，否则默认使用当前对话所用的语言。",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "想用其他语言看指南，直接说出来就行（例如 “Start Vera guide in German”）。"
@@ -229,14 +254,14 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "Al iniciar una sesión, llama a vera_session_start (CLI: `vera "
-            "session start`) ANTES de hacer nada. Devuelve el estado actual del "
+            "start`) ANTES de hacer nada. Devuelve el estado actual del "
             "proyecto: la última interpretación del código, restricciones "
             "activas, contradicciones abiertas y decisiones/cambios/pendientes "
             "recientes. Léelo antes de tocar nada."
         ),
         "record": (
             "Cuando el usuario diga \"Vera\", registra el turno con vera_record "
-            "(CLI: `vera session record`). Destila la conversación en: REQUEST "
+            "(CLI: `vera record`). Destila la conversación en: REQUEST "
             "(qué se pidió), CHANGE (qué hiciste y en qué archivos), REASON "
             "(por qué lo estructuraste así), RESULT (qué ocurrió), STATE (tu "
             "comprensión actual del código). Explica también el STATE al "
@@ -250,10 +275,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Distingue observation, decision, assumption y result — nunca registres una suposición como si fuera un hecho.",
             "Nunca sobrescribas un evento pasado. El registro de Vera es de solo anexado por diseño; corrige hacia adelante, no reescribas la historia.",
             "Cuando el usuario diga \"Vera\" a mitad de la conversación, significa: guarda lo ocurrido y explica al usuario tu comprensión actual del código.",
+            "Reconoce \"Vera\"/\"vera\" como disparador en cualquier mayúscula/minúscula y en cualquier parte del mensaje (\"Vera guide\", \"vera guide\", \"abre Vera guide en alemán\" cuentan todas), no solo una coincidencia exacta; si el mensaje nombra un idioma, úsalo para esa llamada, si no, usa por defecto el idioma actual de la conversación.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Pide la guía en otro idioma y Vera responderá en él — p. ej. "
@@ -271,14 +297,14 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "Au début d'une session, appelez vera_session_start (CLI : `vera "
-            "session start`) AVANT toute action. Cela renvoie l'état actuel du "
+            "start`) AVANT toute action. Cela renvoie l'état actuel du "
             "projet : dernière interprétation du code, contraintes actives, "
             "contradictions ouvertes, décisions/changements/points en suspens "
             "récents. Lisez-le avant de toucher à quoi que ce soit."
         ),
         "record": (
             "Quand l'utilisateur dit \"Vera\", enregistrez l'échange avec "
-            "vera_record (CLI : `vera session record`). Distillez la "
+            "vera_record (CLI : `vera record`). Distillez la "
             "conversation en : REQUEST (ce qui a été demandé), CHANGE (ce que "
             "vous avez fait, et quels fichiers), REASON (pourquoi cette "
             "structure), RESULT (ce qui s'est passé), STATE (votre "
@@ -293,10 +319,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Distinguez observation, decision, assumption et result — n'enregistrez jamais une supposition comme un fait.",
             "N'écrasez jamais un événement passé. Le journal de Vera est en ajout seul par conception ; corrigez en avançant, ne réécrivez pas l'historique.",
             "Quand l'utilisateur dit \"Vera\" en cours de conversation, cela signifie : enregistrez ce qui s'est passé ET expliquez à l'utilisateur votre compréhension actuelle du code.",
+            "Reconnaissez \"Vera\"/\"vera\" comme déclencheur quelle que soit la casse et où qu'il apparaisse dans le message (\"Vera guide\", \"vera guide\", \"ouvre Vera guide en allemand\" comptent toutes), pas seulement une correspondance exacte ; si le message nomme une langue, utilisez-la pour cet appel, sinon utilisez par défaut la langue actuelle de la conversation.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Demandez le guide dans une autre langue et Vera répondra dans "
@@ -315,7 +342,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "Rufen Sie zu Beginn einer Sitzung vera_session_start auf (CLI: "
-            "`vera session start`), BEVOR Sie irgendetwas tun. Es liefert den "
+            "`vera start`), BEVOR Sie irgendetwas tun. Es liefert den "
             "aktuellen Projektstatus: die neueste Interpretation der Codebasis, "
             "aktive Constraints, offene Widersprüche sowie aktuelle "
             "Entscheidungen/Änderungen/offene Punkte. Lesen Sie es, bevor Sie "
@@ -323,7 +350,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "record": (
             "Wenn der Nutzer \"Vera\" sagt, protokollieren Sie den Vorgang mit "
-            "vera_record (CLI: `vera session record`). Destillieren Sie das "
+            "vera_record (CLI: `vera record`). Destillieren Sie das "
             "Gespräch zu: REQUEST (was verlangt wurde), CHANGE (was Sie getan "
             "haben, welche Dateien), REASON (warum diese Struktur), RESULT "
             "(was passiert ist), STATE (Ihr aktuelles Verständnis der "
@@ -338,10 +365,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Unterscheiden Sie observation, decision, assumption und result — protokollieren Sie niemals eine Vermutung als Tatsache.",
             "Überschreiben Sie niemals ein vergangenes Ereignis. Veras Ereignisprotokoll ist per Design nur-anhängend; korrigieren Sie vorwärts, statt Geschichte umzuschreiben.",
             "Wenn der Nutzer mitten im Gespräch \"Vera\" sagt, bedeutet das: Speichern Sie, was passiert ist, UND erklären Sie dem Nutzer Ihr aktuelles Verständnis der Codebasis.",
+            "Erkennen Sie \"Vera\"/\"vera\" unabhängig von Groß-/Kleinschreibung und Position in der Nachricht als Auslöser (\"Vera guide\", \"vera guide\", \"Vera guide auf Deutsch öffnen\" zählen alle), nicht nur bei exakter Übereinstimmung; nennt die Nachricht eine Sprache, verwenden Sie diese für den Aufruf, andernfalls die aktuelle Sprache des Gesprächs.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Fragen Sie nach dem Guide in einer anderen Sprache, und Vera "
@@ -358,12 +386,12 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "세션을 시작할 때는 작업을 하기 전에 반드시 vera_session_start"
-            "(CLI: `vera session start`)를 호출하세요. 프로젝트의 현재 상태 — "
+            "(CLI: `vera start`)를 호출하세요. 프로젝트의 현재 상태 — "
             "코드베이스에 대한 최신 해석, 활성 제약 조건, 미해결 모순, 최근 결정/변경/"
             "미해결 항목 — 이 반환됩니다. 무엇이든 손대기 전에 반드시 읽으세요."
         ),
         "record": (
-            "사용자가 \"Vera\"라고 말하면 vera_record(CLI: `vera session record`)로 "
+            "사용자가 \"Vera\"라고 말하면 vera_record(CLI: `vera record`)로 "
             "그 내용을 기록하세요. 대화를 REQUEST(무엇을 요청받았는지), CHANGE(무엇을 "
             "했는지, 어떤 파일인지), REASON(왜 그렇게 구성했는지), RESULT(무슨 일이 "
             "일어났는지), STATE(코드베이스에 대한 현재 이해)로 정리하세요. STATE 내용은 "
@@ -377,10 +405,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "observation(관찰)·decision(결정)·assumption(가정)·result(결과)를 구분할 것 — 추측을 사실처럼 기록하지 말 것.",
             "과거 이벤트를 절대 덮어쓰지 말 것. Vera의 이벤트 로그는 설계상 추가 전용이며, 정정은 앞으로 나아가며 기록하는 것이지 역사를 다시 쓰는 것이 아님.",
             "대화 중 사용자가 \"Vera\"라고 말하면, 그것은 '지금까지의 작업을 저장하고 코드베이스에 대한 현재 이해를 사용자에게 설명하라'는 뜻.",
+            "\"Vera\"/\"vera\"는 대소문자나 메시지 내 위치와 무관하게 트리거로 인식할 것(\"Vera guide\", \"vera guide\", \"독일어로 Vera guide 열어줘\" 모두 해당) — 정확히 일치할 때만이 아님. 메시지에 언어가 명시되어 있으면 그 언어를 사용하고, 없으면 현재 대화 언어를 기본값으로 할 것.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "다른 언어로 가이드를 보고 싶다면 그렇게 요청하면 됩니다 (예: "
@@ -398,7 +427,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "No início de uma sessão, chame vera_session_start (CLI: `vera "
-            "session start`) ANTES de fazer qualquer coisa. Isso retorna o "
+            "start`) ANTES de fazer qualquer coisa. Isso retorna o "
             "estado atual do projeto: a interpretação mais recente do código, "
             "restrições ativas, contradições em aberto e decisões/"
             "mudanças/pendências recentes. Leia antes de tocar em qualquer "
@@ -406,7 +435,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "record": (
             "Quando o usuário disser \"Vera\", registre o turno com vera_record "
-            "(CLI: `vera session record`). Resuma a conversa em: REQUEST (o "
+            "(CLI: `vera record`). Resuma a conversa em: REQUEST (o "
             "que foi pedido), CHANGE (o que você fez, e quais arquivos), "
             "REASON (por que estruturou assim), RESULT (o que aconteceu), "
             "STATE (sua compreensão atual do código). Diga também a parte "
@@ -420,10 +449,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Distinga observation, decision, assumption e result — nunca registre um palpite como se fosse um fato.",
             "Nunca sobrescreva um evento passado. O registro do Vera é somente de acréscimo por design; corrija para a frente, não reescreva o histórico.",
             "Quando o usuário disser \"Vera\" no meio da conversa, isso significa: salve o que aconteceu E explique ao usuário sua compreensão atual do código.",
+            "Reconheça \"Vera\"/\"vera\" como gatilho independente de maiúsculas/minúsculas e de onde aparece na mensagem (\"Vera guide\", \"vera guide\", \"abra o Vera guide em alemão\" contam todas), não apenas uma correspondência exata; se a mensagem citar um idioma, use-o nessa chamada, caso contrário use o idioma atual da conversa.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Peça o guia em outro idioma e o Vera responde nele — ex.: "
@@ -441,7 +471,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "В начале сессии, ДО начала любой работы, вызовите "
-            "vera_session_start (CLI: `vera session start`). Он вернёт "
+            "vera_session_start (CLI: `vera start`). Он вернёт "
             "текущее состояние проекта: последнюю интерпретацию кодовой базы, "
             "активные ограничения, открытые противоречия и недавние "
             "решения/изменения/нерешённые вопросы. Прочитайте это, прежде чем "
@@ -449,7 +479,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "record": (
             "Когда пользователь говорит \"Vera\", зафиксируйте это через "
-            "vera_record (CLI: `vera session record`). Сведите разговор к: "
+            "vera_record (CLI: `vera record`). Сведите разговор к: "
             "REQUEST (что было запрошено), CHANGE (что вы сделали и в каких "
             "файлах), REASON (почему выбрана такая структура), RESULT (что "
             "произошло), STATE (ваше текущее понимание кодовой базы). Часть "
@@ -464,10 +494,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Различайте observation, decision, assumption и result — никогда не записывайте догадку как факт.",
             "Никогда не перезаписывайте прошлое событие. Журнал Vera по конструкции только для добавления; исправляйте вперёд, а не переписывайте историю.",
             "Если пользователь говорит \"Vera\" посреди разговора, это значит: сохраните произошедшее И объясните пользователю своё текущее понимание кодовой базы.",
+            "Распознавайте \"Vera\"/\"vera\" как триггер независимо от регистра и места в сообщении (\"Vera guide\", \"vera guide\", \"открой Vera guide на немецком\" — всё подходит), а не только точное совпадение; если в сообщении назван язык, используйте его для этого вызова, иначе — текущий язык разговора по умолчанию.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Попросите руководство на другом языке — Vera ответит на нём, "
@@ -485,7 +516,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "All'inizio di una sessione, chiama vera_session_start (CLI: "
-            "`vera session start`) PRIMA di fare qualsiasi cosa. Restituisce "
+            "`vera start`) PRIMA di fare qualsiasi cosa. Restituisce "
             "lo stato attuale del progetto: l'ultima interpretazione del "
             "codice, i vincoli attivi, le contraddizioni aperte e le "
             "decisioni/modifiche/questioni in sospeso recenti. Leggilo prima "
@@ -493,7 +524,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "record": (
             "Quando l'utente dice \"Vera\", registra il turno con vera_record "
-            "(CLI: `vera session record`). Distilla la conversazione in: "
+            "(CLI: `vera record`). Distilla la conversazione in: "
             "REQUEST (cosa è stato chiesto), CHANGE (cosa hai fatto, e in "
             "quali file), REASON (perché quella struttura), RESULT (cosa è "
             "successo), STATE (la tua comprensione attuale del codice). Di' "
@@ -508,10 +539,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "Distingui observation, decision, assumption e result — non registrare mai una supposizione come se fosse un fatto.",
             "Non sovrascrivere mai un evento passato. Il registro di Vera è a sola aggiunta per progettazione; correggi in avanti, non riscrivere la storia.",
             "Quando l'utente dice \"Vera\" a metà conversazione, significa: salva ciò che è successo E spiega all'utente la tua comprensione attuale del codice.",
+            "Riconosci \"Vera\"/\"vera\" come trigger indipendentemente da maiuscole/minuscole e da dove compare nel messaggio (\"Vera guide\", \"vera guide\", \"apri Vera guide in tedesco\" contano tutte), non solo una corrispondenza esatta; se il messaggio nomina una lingua, usala per quella chiamata, altrimenti usa la lingua corrente della conversazione.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "Chiedi la guida in un'altra lingua e Vera risponderà in quella "
@@ -529,14 +561,14 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "في بداية الجلسة، استدعِ vera_session_start (سطر الأوامر: `vera "
-            "session start`) قبل القيام بأي عمل. يُعيد الحالة الحالية "
+            "start`) قبل القيام بأي عمل. يُعيد الحالة الحالية "
             "للمشروع: أحدث تفسير لقاعدة الكود، القيود النشطة، التناقضات "
             "المفتوحة، والقرارات/التغييرات/المهام غير المكتملة الأخيرة. اقرأه "
             "قبل أن تلمس أي شيء."
         ),
         "record": (
             "عندما يقول المستخدم \"Vera\"، سجّل ما جرى باستخدام vera_record "
-            "(سطر الأوامر: `vera session record`). لخّص المحادثة إلى: REQUEST "
+            "(سطر الأوامر: `vera record`). لخّص المحادثة إلى: REQUEST "
             "(ما طُلب)، CHANGE (ما فعلته، وأي الملفات)، REASON (لماذا اخترت "
             "هذا التصميم)، RESULT (ما الذي حدث)، STATE (فهمك الحالي لقاعدة "
             "الكود). واذكر جزء STATE أيضًا للمستخدم في ردّك — فـVera لا يقرأ "
@@ -549,10 +581,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "ميّز بين observation وdecision وassumption وresult — لا تسجّل تخمينًا كأنه حقيقة.",
             "لا تستبدل حدثًا سابقًا أبدًا. سجل Vera قابل للإلحاق فقط بالتصميم؛ صحّح للأمام، ولا تعِد كتابة التاريخ.",
             "عندما يقول المستخدم \"Vera\" في منتصف المحادثة، يعني ذلك: احفظ ما حدث واشرح للمستخدم فهمك الحالي لقاعدة الكود.",
+            "تعرّف على \"Vera\"/\"vera\" كمشغّل بغض النظر عن حالة الأحرف أو موضعها في الرسالة (\"Vera guide\"، \"vera guide\"، \"افتح Vera guide بالألمانية\" كلها تُحتسب)، وليس فقط عند التطابق التام؛ إذا ذكرت الرسالة لغة، استخدمها لهذا الاستدعاء، وإلا استخدم لغة المحادثة الحالية افتراضيًا.",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "اطلب الدليل بلغة أخرى وسيجيب Vera بها — مثل \"Start Vera guide in "
@@ -569,12 +602,12 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ),
         "start": (
             "सत्र शुरू होते ही, कोई भी काम करने से पहले vera_session_start "
-            "(CLI: `vera session start`) कॉल करें। यह प्रोजेक्ट की वर्तमान स्थिति "
+            "(CLI: `vera start`) कॉल करें। यह प्रोजेक्ट की वर्तमान स्थिति "
             "लौटाता है: कोडबेस की नवीनतम व्याख्या, सक्रिय बाध्यताएँ, खुले विरोधाभास, "
             "और हाल के निर्णय/बदलाव/अनसुलझे मुद्दे। कुछ भी छूने से पहले इसे पढ़ें।"
         ),
         "record": (
-            "जब उपयोगकर्ता \"Vera\" कहे, तो vera_record (CLI: `vera session "
+            "जब उपयोगकर्ता \"Vera\" कहे, तो vera_record (CLI: `vera "
             "record`) से उस बातचीत को दर्ज करें। बातचीत को इनमें बाँटें: REQUEST "
             "(क्या माँगा गया), CHANGE (आपने क्या किया, किन फ़ाइलों में), REASON "
             "(यह संरचना क्यों चुनी), RESULT (क्या हुआ), STATE (कोडबेस की आपकी वर्तमान "
@@ -588,10 +621,11 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
             "observation, decision, assumption और result में फ़र्क़ करें — किसी अनुमान को तथ्य की तरह दर्ज न करें।",
             "किसी पुराने इवेंट को कभी न बदलें। Vera का इवेंट लॉग डिज़ाइन से केवल-जोड़ने-योग्य है; सुधार आगे बढ़कर दर्ज करें, इतिहास को फिर से न लिखें।",
             "बातचीत के बीच में जब उपयोगकर्ता \"Vera\" कहे, इसका मतलब है: जो हुआ उसे सहेजें, और कोडबेस की अपनी वर्तमान समझ उपयोगकर्ता को समझाएँ।",
+            "\"Vera\"/\"vera\" को केस या संदेश में स्थिति की परवाह किए बिना ट्रिगर के रूप में पहचानें (\"Vera guide\", \"vera guide\", \"जर्मन में Vera guide खोलो\" सभी मान्य हैं), केवल सटीक मिलान नहीं; यदि संदेश में कोई भाषा बताई गई है तो उसी में जवाब दें, अन्यथा बातचीत की मौजूदा भाषा डिफ़ॉल्ट रहे।",
         ],
         "commands": (
-            "vera session start · vera session record · vera session guide [--lang xx] · "
-            "vera session search <query> · vera session check --action <a>"
+            "vera start · vera record · vera guide [--lang xx] · "
+            "vera search <query> · vera check --action <a> · vera pause / vera resume · vera status"
         ),
         "switch": (
             "किसी अन्य भाषा में गाइड माँगें और Vera उसी में जवाब देगा — जैसे "

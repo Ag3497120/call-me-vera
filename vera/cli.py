@@ -137,8 +137,47 @@ def cmd_session_record(args) -> int:
             interpretation=args.interpretation or "",
             unresolved=args.unresolved or "",
             lang=resolve_lang(args.lang),
+            model_timestamp=getattr(args, "model_timestamp", "") or "",
         )
         _print(result)
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_pause(args) -> int:
+    """Stop `record` from saving content until `resume` — use before a
+    burst of activity you don't want recorded turn-by-turn."""
+    from .store import VeraStore
+
+    store = VeraStore(_store_path(args))
+    try:
+        _print(store.pause(by=getattr(args, "by", None) or "local"))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_resume(args) -> int:
+    """Undo `pause` — `record` saves normally again."""
+    from .store import VeraStore
+
+    store = VeraStore(_store_path(args))
+    try:
+        _print(store.resume(by=getattr(args, "by", None) or "local"))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_status(args) -> int:
+    """Live session status: paused or not, last event, last control
+    decision (duplicate suppressed / paused skip), and running counts."""
+    from .store import VeraStore
+
+    store = VeraStore(_store_path(args))
+    try:
+        _print(store.status())
     finally:
         store.close()
     return 0
@@ -389,7 +428,22 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--interpretation", default="", help="current understanding of the codebase (STATE)")
     p.add_argument("--unresolved", default="", help="anything left open")
     p.add_argument("--lang", default="en", help="language this turn is recorded in")
+    p.add_argument("--model-timestamp", dest="model_timestamp", default="",
+                    help="ISO 8601 timestamp from the calling agent's own clock, "
+                         "if it has one — sharpens duplicate detection; optional")
     p.set_defaults(fn=cmd_session_record)
+
+    # pause / resume / status
+    p = sub.add_parser("pause", help="stop `record` from saving until `resume`", parents=[store_parent])
+    p.add_argument("--by", default="local", help="who paused it (recorded, not enforced)")
+    p.set_defaults(fn=cmd_pause)
+
+    p = sub.add_parser("resume", help="undo `pause`", parents=[store_parent])
+    p.add_argument("--by", default="local")
+    p.set_defaults(fn=cmd_resume)
+
+    p = sub.add_parser("status", help="live session status: paused/last event/suppressed counts", parents=[store_parent])
+    p.set_defaults(fn=cmd_status)
 
     # interpretation
     p = sub.add_parser("interpretation", help="latest codebase-interpretation snapshots", parents=[store_parent])

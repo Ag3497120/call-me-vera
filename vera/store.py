@@ -202,6 +202,28 @@ def _stable_id(kind: str, session_id: str, text: str) -> str:
     return h[:12]
 
 
+def _time_bucket(iso_ts: str, seconds: int = 5) -> str:
+    """Round an ISO timestamp down to a coarse window. Used as the time
+    component of a dedup fingerprint when the caller doesn't supply its
+    own model_timestamp: an agent that immediately re-sends an identical
+    save (the actual failure mode this guards against) will land in the
+    same bucket even though the wall-clock second differs slightly; two
+    turns with identical text minutes apart will not."""
+    epoch = datetime.fromisoformat(iso_ts).timestamp()
+    return str(int(epoch // seconds) * seconds)
+
+
+def _turn_fingerprint(author: str, session_id: str, time_key: str, request: str, result: str) -> str:
+    """SHA256 over (author, session, time bucket/model-declared time,
+    request, result) — deliberately request+result only, not every field,
+    matching the property that actually indicates 'the same save happened
+    twice': same ask, same outcome, same author, same session, close in
+    time. change/reason/interpretation can legitimately vary in wording
+    between an agent's retries without changing whether it's a duplicate."""
+    raw = f"{author}|{session_id}|{time_key}|{request}|{result}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def extract_summary(event: SessionEvent) -> SessionSummary:
     """Deterministic summarization from raw event data."""
     actions = event.actions or []
@@ -374,6 +396,49 @@ BEGIN
     SELECT RAISE(ABORT, 'event_log is append-only: DELETE is not permitted');
 END;
 
+-- Bookkeeping for the dedup/pause machinery below — a *separate* table
+-- from event_log on purpose: it records what Vera *decided not* to save
+-- (a duplicate, or a skip while paused) so that's still observable
+-- ("why isn't there an event here?") without touching event_log's own
+-- append-only content stream or its CHECK constraint (SQLite can't ALTER
+-- a CHECK constraint on an existing table, so new content *types* belong
+-- in a new table, not a widened constraint on this one).
+CREATE TABLE IF NOT EXISTS control_log (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('duplicate_suppressed', 'paused_skip', 'pause', 'resume')),
+    fingerprint TEXT,
+    original_turn_id TEXT,
+    session_id TEXT,
+    author TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TRIGGER IF NOT EXISTS control_log_append_only_update
+BEFORE UPDATE ON control_log
+BEGIN
+    SELECT RAISE(ABORT, 'control_log is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER IF NOT EXISTS control_log_append_only_delete
+BEFORE DELETE ON control_log
+BEGIN
+    SELECT RAISE(ABORT, 'control_log is append-only: DELETE is not permitted');
+END;
+
+-- Single-row pause switch. Persisted (not in-memory) on purpose: pausing
+-- is a deliberate act ("Vera pause" during bulk agent work) that should
+-- survive an MCP server/process restart, not silently reset.
+CREATE TABLE IF NOT EXISTS session_control (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    paused INTEGER NOT NULL DEFAULT 0,
+    paused_at TEXT,
+    paused_by TEXT,
+    resumed_at TEXT,
+    updated_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_prompt ON events(user_prompt);
 CREATE INDEX IF NOT EXISTS idx_events_author ON events(author);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
@@ -382,7 +447,22 @@ CREATE INDEX IF NOT EXISTS idx_constraints_active ON constraints(active);
 CREATE INDEX IF NOT EXISTS idx_event_log_turn ON event_log(turn_id);
 CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log(type);
 CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_control_log_kind ON control_log(kind);
 """
+
+# Columns added to event_log after its original release. New tables handle
+# schema growth via CREATE TABLE IF NOT EXISTS above, but a table that
+# already exists on disk (any store created before this version) needs an
+# explicit ALTER — "IF NOT EXISTS" only guards table creation, not columns
+# on a table that's already there. Each is a plain nullable TEXT column,
+# which SQLite's ALTER TABLE ADD COLUMN supports without a table rebuild.
+_EVENT_LOG_MIGRATIONS = [
+    ("session_id", "TEXT"),
+    ("model_timestamp", "TEXT"),
+    ("received_at", "TEXT"),
+    ("committed_at", "TEXT"),
+    ("fingerprint", "TEXT"),
+]
 
 
 class VeraStore:
@@ -399,8 +479,36 @@ class VeraStore:
         # its own locking on top.
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        self._migrate_event_log_columns()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO session_control (id, paused, updated_at) VALUES (1, 0, ?)",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        self._conn.commit()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+
+        # This VeraStore instance's own "session" — one run of an MCP
+        # server process, or one CLI invocation. Deduplication is scoped
+        # to it deliberately: the failure mode this guards against is an
+        # agent re-sending the same save within one live connection, not
+        # two genuinely different sessions producing similar-looking text.
+        #
+        # Practical consequence: `vera record` run twice from a terminal
+        # (two separate processes, two separate session_ids) will NOT
+        # dedup against each other, even seconds apart — only repeat calls
+        # within one running MCP server connection do. That's intentional:
+        # the reported problem is an agent's tool-call retry inside one
+        # live session, and a human/script re-running the CLI on purpose
+        # shouldn't have a legitimate second run silently swallowed.
+        self.session_id = str(uuid.uuid4())
+
+    def _migrate_event_log_columns(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(event_log)")}
+        for name, coltype in _EVENT_LOG_MIGRATIONS:
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE event_log ADD COLUMN {name} {coltype}")
+        self._conn.commit()
 
     # -- public API --------------------------------------------------------
 
@@ -696,20 +804,79 @@ class VeraStore:
     # (enforced by the append_only triggers in the schema). record_turn()
     # also feeds the same data through save_session() so the existing
     # facts/constraints/contradiction/search pipeline keeps working on top.
+    #
+    # Every row also carries three timestamps and a fingerprint:
+    #   model_timestamp — what the calling agent says "now" is, if it says
+    #                      anything (optional; different agents/clocks may
+    #                      disagree, so this is informational, not the
+    #                      dedup key by itself)
+    #   received_at     — when this store actually processed the call
+    #                      (server clock, authoritative, always present)
+    #   committed_at     — when the SQLite commit for this turn completed
+    #   fingerprint      — sha256(author, session, time bucket, request,
+    #                      result) — see _turn_fingerprint(); a repeat of
+    #                      that exact fingerprint is treated as the same
+    #                      save arriving twice, not a new event.
 
     def _append_event_log(
         self, turn_id: str, author: str, type_: str, content: str,
         files: List[str] | None = None, lang: str = "en",
+        model_timestamp: str = "", received_at: str = "",
+        committed_at: str = "", fingerprint: str = "",
     ) -> str:
         eid = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
+        now = received_at or datetime.now(timezone.utc).isoformat()
         self._conn.execute(
-            "INSERT INTO event_log (id, turn_id, ts, author, type, content, files, lang, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO event_log (id, turn_id, ts, author, type, content, files, lang,"
+            " created_at, session_id, model_timestamp, received_at, committed_at, fingerprint)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (eid, turn_id, now, author, type_, content,
-             json.dumps(files or [], ensure_ascii=False), lang, now),
+             json.dumps(files or [], ensure_ascii=False), lang, now,
+             self.session_id, model_timestamp, received_at, committed_at, fingerprint),
         )
         return eid
+
+    def _log_control(
+        self, kind: str, fingerprint: str = "", original_turn_id: str = "",
+        author: str = "", note: str = "",
+    ) -> str:
+        cid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT INTO control_log (id, ts, kind, fingerprint, original_turn_id,"
+            " session_id, author, note, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (cid, now, kind, fingerprint, original_turn_id, self.session_id, author, note, now),
+        )
+        self._conn.commit()
+        return cid
+
+    def is_paused(self) -> bool:
+        row = self._conn.execute("SELECT paused FROM session_control WHERE id=1").fetchone()
+        return bool(row and row[0])
+
+    def pause(self, by: str = "local") -> Dict[str, Any]:
+        """Stop record_turn() from saving content until resume() — the
+        "Vera pause" / "before bulk agent work" case. The attempt itself is
+        still logged (as control_log, not silently dropped) once resumed
+        recording actually skips something, so a gap is always traceable."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "UPDATE session_control SET paused=1, paused_at=?, paused_by=?, updated_at=? WHERE id=1",
+            (now, by, now),
+        )
+        self._conn.commit()
+        self._log_control("pause", author=by)
+        return {"paused": True, "paused_at": now, "paused_by": by}
+
+    def resume(self, by: str = "local") -> Dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "UPDATE session_control SET paused=0, resumed_at=?, updated_at=? WHERE id=1",
+            (now, now),
+        )
+        self._conn.commit()
+        self._log_control("resume", author=by)
+        return {"paused": False, "resumed_at": now}
 
     def record_turn(
         self,
@@ -722,29 +889,63 @@ class VeraStore:
         interpretation: str = "",
         unresolved: str = "",
         lang: str = "en",
+        model_timestamp: str = "",
     ) -> Dict[str, Any]:
-        """Append one structured 'Vera' turn. Returns {"turn_id", "event_ids"}.
+        """Append one structured 'Vera' turn. Returns {"turn_id", "event_ids"}
+        normally; {"paused": True, "skipped": True} if recording is
+        currently paused; {"duplicate_suppressed": True, "turn_id": <original>}
+        if this exact (author, session, time-window, request, result) was
+        already recorded — the original is left untouched, and this
+        decision is itself logged to control_log, not silently dropped.
 
         REQUEST/CHANGE/REASON/RESULT/STATE(interpretation)/unresolved each
         become their own immutable event_log row under one turn_id — the
         request is always recorded even if every other field is empty."""
+        if self.is_paused():
+            self._log_control("paused_skip", author=author, note=request[:200])
+            return {"paused": True, "skipped": True}
+
+        received_at = datetime.now(timezone.utc).isoformat()
+        time_key = model_timestamp or _time_bucket(received_at)
+        fingerprint = _turn_fingerprint(author, self.session_id, time_key, request, result)
+
+        existing = self._conn.execute(
+            "SELECT turn_id FROM event_log WHERE fingerprint=? LIMIT 1", (fingerprint,)
+        ).fetchone()
+        if existing:
+            self._log_control(
+                "duplicate_suppressed", fingerprint=fingerprint,
+                original_turn_id=existing[0], author=author,
+            )
+            return {"turn_id": existing[0], "event_ids": [], "duplicate_suppressed": True}
+
         turn_id = self.save_session(
             author=author,
             user_prompt=request,
             actions=[change] if change else [],
             observations=[result] if result else [],
         )
-        event_ids = [self._append_event_log(turn_id, author, "request", request, lang=lang)]
+        # committed_at is set *before* the inserts below, not patched in
+        # afterward — event_log's append-only triggers reject UPDATE
+        # outright (on purpose), so there's no "insert, then stamp the
+        # actual commit time" pass available. This is the timestamp taken
+        # immediately before the one atomic commit() that persists every
+        # row in this turn together, which is what "committed" means here
+        # in practice for a synchronous, single-writer store.
+        committed_at = datetime.now(timezone.utc).isoformat()
+        kw = dict(model_timestamp=model_timestamp, received_at=received_at,
+                  committed_at=committed_at, fingerprint=fingerprint)
+        event_ids = [self._append_event_log(turn_id, author, "request", request, lang=lang, **kw)]
         if change:
-            event_ids.append(self._append_event_log(turn_id, author, "change", change, files=files, lang=lang))
+            event_ids.append(self._append_event_log(turn_id, author, "change", change, files=files, lang=lang, **kw))
         if reason:
-            event_ids.append(self._append_event_log(turn_id, author, "decision", reason, lang=lang))
+            event_ids.append(self._append_event_log(turn_id, author, "decision", reason, lang=lang, **kw))
         if result:
-            event_ids.append(self._append_event_log(turn_id, author, "result", result, lang=lang))
+            event_ids.append(self._append_event_log(turn_id, author, "result", result, lang=lang, **kw))
         if interpretation:
-            event_ids.append(self._append_event_log(turn_id, author, "interpretation", interpretation, lang=lang))
+            event_ids.append(self._append_event_log(turn_id, author, "interpretation", interpretation, lang=lang, **kw))
         if unresolved:
-            event_ids.append(self._append_event_log(turn_id, author, "unresolved", unresolved, lang=lang))
+            event_ids.append(self._append_event_log(turn_id, author, "unresolved", unresolved, lang=lang, **kw))
         self._conn.commit()
         return {"turn_id": turn_id, "event_ids": event_ids}
 
@@ -805,6 +1006,7 @@ class VeraStore:
             "recent_changes": self.get_event_log(type_="change", k=recent_n),
             "recent_unresolved": self.get_event_log(type_="unresolved", k=recent_n),
             "recent_results": self.get_event_log(type_="result", k=recent_n),
+            "recording_paused": self.is_paused(),
         }
 
     def sync(self, other_path: str | Path) -> Dict[str, Any]:
@@ -887,17 +1089,43 @@ class VeraStore:
 
         # event_log rows have a globally-unique id and are append-only on
         # both sides, so merging is a plain id-keyed copy — no re-derivation
-        # needed the way events/facts/constraints get above.
-        for row in other._conn.execute(
-            "SELECT id, turn_id, ts, author, type, content, files, lang, created_at FROM event_log"
-        ).fetchall():
+        # needed the way events/facts/constraints get above. Columns are
+        # named explicitly (not SELECT * / bare VALUES) so this keeps
+        # working if the schema grows again — a bare positional INSERT
+        # breaks the moment the table has more columns than the tuple.
+        _EVENT_LOG_COLS = (
+            "id, turn_id, ts, author, type, content, files, lang, created_at, "
+            "session_id, model_timestamp, received_at, committed_at, fingerprint"
+        )
+        for row in other._conn.execute(f"SELECT {_EVENT_LOG_COLS} FROM event_log").fetchall():
             eid = row[0]
             exists_e = self._conn.execute(
                 "SELECT COUNT(*) FROM event_log WHERE id=?", (eid,)
             ).fetchone()[0]
             if not exists_e:
+                placeholders = ",".join("?" * len(row))
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO event_log VALUES (?,?,?,?,?,?,?,?,?)", row
+                    f"INSERT OR IGNORE INTO event_log ({_EVENT_LOG_COLS}) VALUES ({placeholders})", row
+                )
+                merged["updated"] += 1
+
+        # control_log likewise: globally-unique id, append-only, plain
+        # id-keyed copy. session_control (the pause switch) deliberately
+        # does NOT sync — pause/resume is a local operational decision for
+        # this store, not something a merge should import from elsewhere.
+        for row in other._conn.execute(
+            "SELECT id, ts, kind, fingerprint, original_turn_id, session_id, author, note, created_at"
+            " FROM control_log"
+        ).fetchall():
+            cid = row[0]
+            exists_c = self._conn.execute(
+                "SELECT COUNT(*) FROM control_log WHERE id=?", (cid,)
+            ).fetchone()[0]
+            if not exists_c:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO control_log"
+                    " (id, ts, kind, fingerprint, original_turn_id, session_id, author, note, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)", row
                 )
                 merged["updated"] += 1
 
@@ -921,6 +1149,44 @@ class VeraStore:
             "constraints": n_constraints,
             "contradictions": n_contradictions,
             "authors": authors,
+        }
+
+    def status(self) -> Dict[str, Any]:
+        """Live session status: pause state, the last event actually
+        recorded, the last control decision (a duplicate suppressed, a
+        paused save skipped, a pause/resume), and running counts — the
+        "why isn't there an event here" view, distinct from report()'s
+        aggregate counts."""
+        paused = self.is_paused()
+        last_event = self._conn.execute(
+            "SELECT turn_id, ts, author, type FROM event_log ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        last_control = self._conn.execute(
+            "SELECT kind, ts, original_turn_id FROM control_log ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        n_suppressed = self._conn.execute(
+            "SELECT COUNT(*) FROM control_log WHERE kind='duplicate_suppressed'"
+        ).fetchone()[0]
+        n_paused_skips = self._conn.execute(
+            "SELECT COUNT(*) FROM control_log WHERE kind='paused_skip'"
+        ).fetchone()[0]
+        n_events_this_session = self._conn.execute(
+            "SELECT COUNT(*) FROM event_log WHERE session_id=?", (self.session_id,)
+        ).fetchone()[0]
+        return {
+            "session_id": self.session_id,
+            "state": "PAUSED" if paused else "READY",
+            "last_event": (
+                {"turn_id": last_event[0], "ts": last_event[1], "author": last_event[2], "type": last_event[3]}
+                if last_event else None
+            ),
+            "last_control": (
+                {"kind": last_control[0], "ts": last_control[1], "original_turn_id": last_control[2]}
+                if last_control else None
+            ),
+            "events_this_session": n_events_this_session,
+            "duplicates_suppressed_total": n_suppressed,
+            "paused_skips_total": n_paused_skips,
         }
 
     def close(self) -> None:

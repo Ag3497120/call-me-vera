@@ -84,7 +84,9 @@ disk, in a file every agent working on the project can read.
 vera init [dir]                 create the store in a project directory
 vera start [--lang xx]          call BEFORE work: project state + protocol
 vera guide [--lang xx]          full onboarding explanation, any language
-vera record --request "..."     the structured "Vera" capture
+vera record --request "..."     the structured "Vera" capture (auto-dedups a retry)
+vera pause / vera resume        stop/restart recording for a burst of activity
+vera status                     paused? last event? last suppressed duplicate?
 vera search <query>             search across events, facts, constraints
 vera check --action <a>         consistency check against constraints
 vera constraints                list active constraints
@@ -109,6 +111,13 @@ Full reference: [docs/VERA_SESSION.md](docs/VERA_SESSION.md).
   filesystem write to the same SQLite store directly. `vera sync` exists
   for the case where two stores genuinely never shared a filesystem (a
   different machine) and need to reconcile afterward.
+* **A retried save doesn't become two events.** An agent re-sending the
+  same `vera_record` call — different models, different clocks — is
+  recognized by a fingerprint over (author, session, request, result) and
+  suppressed, not duplicated; the suppression itself is logged, never
+  silently dropped. `vera pause` stops recording for a burst of activity
+  you don't want captured turn-by-turn; `vera status` shows what actually
+  happened.
 
 ## License
 

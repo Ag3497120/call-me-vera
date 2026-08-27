@@ -179,6 +179,7 @@ def vera_serve(store_path: str) -> int:
         interpretation: str = "",
         unresolved: str = "",
         lang: str = "en",
+        model_timestamp: str = "",
     ) -> str:
         """Call this when the user says \"Vera\" mid-conversation. Distill
         the turn into REQUEST (what was asked), CHANGE (what you did, and
@@ -187,7 +188,18 @@ def vera_serve(store_path: str) -> int:
         (your current understanding of the codebase — also say this part
         out loud to the user in your reply), and unresolved (anything left
         open). Every non-empty field becomes its own permanent, append-only
-        record — Vera never overwrites a past event."""
+        record — Vera never overwrites a past event.
+
+        Pass `model_timestamp` (ISO 8601, your own clock) if you have one —
+        it sharpens duplicate detection across agents with different
+        clocks; if omitted, Vera buckets its own receive time instead.
+        Calling this again with the same author/request/result within a
+        few seconds is recognized as the same save arriving twice and is
+        NOT recorded again (response has `"duplicate_suppressed": true`,
+        original turn_id returned) — safe to retry a call you're unsure
+        went through. If recording is currently paused (`vera_pause`),
+        this returns `{"paused": true, "skipped": true}` and records
+        nothing; call `vera_resume` first."""
         try:
             files_list = json.loads(files) if files else []
         except (json.JSONDecodeError, TypeError) as exc:
@@ -196,8 +208,33 @@ def vera_serve(store_path: str) -> int:
             author=author, request=request, change=change, reason=reason,
             files=files_list, result=result, interpretation=interpretation,
             unresolved=unresolved, lang=resolve_lang(lang),
+            model_timestamp=model_timestamp,
         )
         return json.dumps(result_dict, ensure_ascii=False)
+
+    @mcp.tool()
+    def vera_pause(by: str = "local") -> str:
+        """Stop vera_record from saving content until vera_resume is
+        called — use this before a burst of agent activity you don't want
+        recorded turn-by-turn (e.g. bulk automated processing), then call
+        vera_resume and vera_record once at the end for the result that
+        matters. Skipped attempts while paused are still logged (see
+        vera_status) so a gap is traceable, not silently missing. Persists
+        across a server restart until explicitly resumed."""
+        return json.dumps(store.pause(by=by), ensure_ascii=False)
+
+    @mcp.tool()
+    def vera_resume(by: str = "local") -> str:
+        """Undo vera_pause — vera_record saves normally again."""
+        return json.dumps(store.resume(by=by), ensure_ascii=False)
+
+    @mcp.tool()
+    def vera_status() -> str:
+        """Live session status: paused or not, the last event actually
+        recorded, the last control decision (duplicate suppressed / paused
+        skip / pause / resume), and running counts of each — the "why
+        isn't there an event here" view."""
+        return json.dumps(store.status(), ensure_ascii=False)
 
     @mcp.tool()
     def vera_add_interpretation(text: str, author: str = "vera", lang: str = "en") -> str:
