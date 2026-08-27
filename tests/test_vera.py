@@ -14,6 +14,7 @@ renders without error, with no leftover mention of the CLI's old nested
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 
@@ -410,3 +411,36 @@ def test_session_start_prompts_for_a_name_when_fresh_and_unnamed(tmp_path):
     assert state["digest"] is None
     assert state["size"]["uncompressed_entries"] == 0
     store.close()
+
+
+def test_store_flag_before_subcommand_is_not_clobbered(tmp_path, monkeypatch, capsys):
+    """Regression: `vera --store X <cmd>` used to silently discard the
+    top-level --store, because each sub-parser also declared --store
+    with its own real default, and argparse applies a sub-parser's
+    default onto the shared namespace whenever the flag isn't repeated
+    after the sub-command name. That clobbered the already-parsed
+    top-level value with DEFAULT_STORE, so commands like `vera --store
+    /real/path.db stats` silently read/wrote the wrong (relative,
+    usually nonexistent) file instead of erroring — found while
+    consolidating a real store via `vera claim-name`, where it caused a
+    sync from an empty store instead of the real one. --store X after
+    the sub-command must keep working too."""
+    from vera.cli import main
+
+    real = tmp_path / "real.db"
+    store = init_store(real)
+    store.record_turn(author="local", request="r")  # one field -> one event_log row
+    store.close()
+
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+
+    rc = main(["--store", str(real), "stats"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["entries"] == 1
+
+    rc = main(["stats", "--store", str(real)])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["entries"] == 1

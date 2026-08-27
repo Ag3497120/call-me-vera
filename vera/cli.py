@@ -300,9 +300,18 @@ def main(argv: Optional[list] = None) -> int:
     # people actually type) — so they're declared on a shared parent,
     # included in every sub-parser via `parents=[...]`, *and* kept on the
     # top-level parser for the "--store X <cmd>" order too.
+    #
+    # default=SUPPRESS here is load-bearing: if the sub-parser's copy had
+    # a real default, argparse would apply it to the merged namespace
+    # whenever the flag isn't repeated after the sub-command name — even
+    # though the top-level parser already parsed a real value for it —
+    # silently discarding "vera --store X <cmd>" and falling back to
+    # DEFAULT_STORE. SUPPRESS means the sub-parser only ever touches
+    # args.store/args.name when the flag actually appears after the
+    # sub-command, leaving the top-level-parsed value alone otherwise.
     store_parent = argparse.ArgumentParser(add_help=False)
-    store_parent.add_argument("--store", default=DEFAULT_STORE, help="Vera store path")
-    store_parent.add_argument("--name", default=None, help="use a named, shared memory instead of --store")
+    store_parent.add_argument("--store", default=argparse.SUPPRESS, help="Vera store path")
+    store_parent.add_argument("--name", default=argparse.SUPPRESS, help="use a named, shared memory instead of --store")
     ap.add_argument("--store", default=DEFAULT_STORE, help="Vera store path")
     ap.add_argument("--name", default=None, help="use a named, shared memory instead of --store")
 
