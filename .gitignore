@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+
+# Vera store — per-project local memory (claude/local/vera all write here)
+.vera_store.db
+.vera_store.db-wal
+.vera_store.db-shm
+*.test*.db
