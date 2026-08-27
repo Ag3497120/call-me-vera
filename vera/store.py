@@ -77,14 +77,14 @@ BEGIN
     SELECT RAISE(ABORT, 'event_log is append-only: DELETE is not permitted');
 END;
 
--- What Vera decided NOT to save, and why (a duplicate, a skip while
--- paused, a pause/resume) — kept separate from event_log's content
--- stream so a gap is traceable without touching event_log's own
--- append-only guarantee or CHECK constraint.
+-- What Vera decided NOT to save, and why (currently: a duplicate) —
+-- kept separate from event_log's content stream so a gap is traceable
+-- without touching event_log's own append-only guarantee or CHECK
+-- constraint.
 CREATE TABLE IF NOT EXISTS control_log (
     id TEXT PRIMARY KEY,
     ts TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('duplicate_suppressed', 'paused_skip', 'pause', 'resume')),
+    kind TEXT NOT NULL CHECK(kind IN ('duplicate_suppressed')),
     fingerprint TEXT,
     original_turn_id TEXT,
     session_id TEXT,
@@ -104,18 +104,6 @@ BEFORE DELETE ON control_log
 BEGIN
     SELECT RAISE(ABORT, 'control_log is append-only: DELETE is not permitted');
 END;
-
--- Single-row pause switch. Persisted (not in-memory): pausing is a
--- deliberate act ("Vera pause" during bulk agent work) that should
--- survive a process restart, not silently reset.
-CREATE TABLE IF NOT EXISTS session_control (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    paused INTEGER NOT NULL DEFAULT 0,
-    paused_at TEXT,
-    paused_by TEXT,
-    resumed_at TEXT,
-    updated_at TEXT
-);
 
 -- AI-authored compressed digests. Vera never writes one of these itself
 -- — an agent judges (via stats()'s size estimate) that the uncompressed
@@ -347,10 +335,6 @@ class VeraStore:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._migrate_event_log_columns()
-        self._conn.execute(
-            "INSERT OR IGNORE INTO session_control (id, paused, updated_at) VALUES (1, 0, ?)",
-            (datetime.now(timezone.utc).isoformat(),),
-        )
         self._conn.execute("INSERT OR IGNORE INTO store_meta (id, name) VALUES (1, NULL)")
         self._conn.commit()
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -443,36 +427,6 @@ class VeraStore:
         self._conn.commit()
 
     @_locked
-    def is_paused(self) -> bool:
-        row = self._conn.execute("SELECT paused FROM session_control WHERE id=1").fetchone()
-        return bool(row and row[0])
-
-    @_locked
-    def pause(self, by: str = "local") -> Dict[str, Any]:
-        """Stop record_turn() from saving content until resume() — the
-        "Vera pause" / "before bulk agent work" case. Skipped attempts are
-        still logged (control_log), so a gap is always traceable."""
-        now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            "UPDATE session_control SET paused=1, paused_at=?, paused_by=?, updated_at=? WHERE id=1",
-            (now, by, now),
-        )
-        self._conn.commit()
-        self._log_control("pause", author=by)
-        return {"paused": True, "paused_at": now, "paused_by": by}
-
-    @_locked
-    def resume(self, by: str = "local") -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            "UPDATE session_control SET paused=0, resumed_at=?, updated_at=? WHERE id=1",
-            (now, now),
-        )
-        self._conn.commit()
-        self._log_control("resume", author=by)
-        return {"paused": False, "resumed_at": now}
-
-    @_locked
     def record_turn(
         self,
         author: str,
@@ -487,9 +441,8 @@ class VeraStore:
         model_timestamp: str = "",
     ) -> Dict[str, Any]:
         """Append one structured 'Vera' turn. Returns {"turn_id", "event_ids"}
-        normally; {"paused": True, "skipped": True} if recording is
-        currently paused; {"duplicate_suppressed": True, "turn_id": <original>}
-        if this exact (author, session, time-window, request, result) was
+        normally; {"duplicate_suppressed": True, "turn_id": <original>} if
+        this exact (author, session, time-window, request, result) was
         already recorded — the original is left untouched, and this
         decision is itself logged to control_log, not silently dropped.
 
@@ -498,10 +451,6 @@ class VeraStore:
         turn_id — the request is always recorded even if every other field
         is empty. Vera does not interpret any of this; it's stored exactly
         as given, for whichever agent reads it next to make sense of."""
-        if self.is_paused():
-            self._log_control("paused_skip", author=author, note=request[:200])
-            return {"paused": True, "skipped": True}
-
         received_at = datetime.now(timezone.utc).isoformat()
         time_key = model_timestamp or _time_bucket(received_at)
         fingerprint = _turn_fingerprint(author, self.session_id, time_key, request, result)
@@ -613,7 +562,6 @@ class VeraStore:
                  "content": r[5], "files": json.loads(r[6]) if r[6] else []}
                 for r in recent
             ],
-            "recording_paused": self.is_paused(),
             "size": self._size_estimate(),
         }
 
@@ -670,10 +618,9 @@ class VeraStore:
     def stats(self) -> Dict[str, Any]:
         """Everything about the store's current state in one call: entry/
         author counts, the size estimate (and whether it's over the
-        compression threshold), pause state, the last entry actually
-        recorded, and the last control decision (duplicate suppressed /
-        paused skip / pause / resume) — the "what's actually going on"
-        view."""
+        compression threshold), the last entry actually recorded, and the
+        last control decision (currently: duplicate suppressed) — the
+        "what's actually going on" view."""
         n_entries = self._conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
         authors = dict(self._conn.execute(
             "SELECT author, COUNT(*) FROM event_log GROUP BY author"
@@ -688,16 +635,13 @@ class VeraStore:
         n_suppressed = self._conn.execute(
             "SELECT COUNT(*) FROM control_log WHERE kind='duplicate_suppressed'"
         ).fetchone()[0]
-        n_paused_skips = self._conn.execute(
-            "SELECT COUNT(*) FROM control_log WHERE kind='paused_skip'"
-        ).fetchone()[0]
         n_events_this_session = self._conn.execute(
             "SELECT COUNT(*) FROM event_log WHERE session_id=?", (self.session_id,)
         ).fetchone()[0]
         return {
             "session_id": self.session_id,
             "name": self.get_name(),
-            "state": "PAUSED" if self.is_paused() else "READY",
+            "state": "READY",
             "entries": n_entries,
             "authors": authors,
             "digests": n_digests,
@@ -713,7 +657,6 @@ class VeraStore:
             ),
             "events_this_session": n_events_this_session,
             "duplicates_suppressed_total": n_suppressed,
-            "paused_skips_total": n_paused_skips,
         }
 
     # -- sync ----------------------------------------------------------------
@@ -723,9 +666,7 @@ class VeraStore:
         """Merge another VeraStore into this one — event_log, control_log,
         and digests, all id-keyed and append-only on both sides, for the
         case where two stores never shared a filesystem (a different
-        machine) and need to reconcile after the fact. session_control
-        (the pause switch) deliberately does not sync — pausing is a
-        local, per-store decision."""
+        machine) and need to reconcile after the fact."""
         other = VeraStore(other_path)
         merged: Dict[str, int] = {"inserted": 0, "conflicts": 0, "updated": 0}
 

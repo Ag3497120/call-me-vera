@@ -2,8 +2,8 @@
 
 Deliberately small: vera_guide explains everything else, so the tool
 surface itself stays close to just "read the memory" / "write to it" /
-"compress it when it's getting large" / "pause/resume" / "sync" / "name it
-so other sessions/apps can find it".
+"compress it when it's getting large" / "sync" / "name it so other
+sessions/apps can find it".
 
 MCP server name: "vera"
 """
@@ -100,8 +100,8 @@ def vera_serve(store_path: str) -> int:
         again with that name to create it, or call vera_claim_name
         directly. Once a name is established, pass it on every
         vera_record / vera_lookup / vera_search / vera_compress /
-        vera_pause / vera_resume / vera_stats call for the rest of this
-        session — Vera does not remember it for you between calls."""
+        vera_stats call for the rest of this session — Vera does not
+        remember it for you between calls."""
         target = _resolve(name)
         state = target.get_project_state()
         if not name and not state["name"] and state["size"]["uncompressed_entries"] == 0 and not state["digest"]:
@@ -188,9 +188,7 @@ def vera_serve(store_path: str) -> int:
         few seconds is recognized as the same save arriving twice and is
         NOT recorded again (response has `"duplicate_suppressed": true`,
         original turn_id returned) — safe to retry a call you're unsure
-        went through. If recording is currently paused (`vera_pause`),
-        this returns `{"paused": true, "skipped": true}` and records
-        nothing; call `vera_resume` first."""
+        went through."""
         try:
             files_list = json.loads(files) if files else []
         except (json.JSONDecodeError, TypeError) as exc:
@@ -242,31 +240,13 @@ def vera_serve(store_path: str) -> int:
         )
 
     @mcp.tool()
-    def vera_pause(by: str = "local", name: str = "") -> str:
-        """Stop vera_record from saving content until vera_resume is
-        called — use this before a burst of agent activity you don't want
-        recorded turn-by-turn (e.g. bulk automated processing), then call
-        vera_resume and vera_record once at the end for the result that
-        matters. Skipped attempts while paused are still logged (see
-        vera_stats) so a gap is traceable, not silently missing. Persists
-        across a server restart until explicitly resumed. Pass `name` if
-        this session is using a named memory."""
-        return json.dumps(_resolve(name).pause(by=by), ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_resume(by: str = "local", name: str = "") -> str:
-        """Undo vera_pause — vera_record saves normally again. Pass
-        `name` if this session is using a named memory."""
-        return json.dumps(_resolve(name).resume(by=by), ensure_ascii=False)
-
-    @mcp.tool()
     def vera_stats(name: str = "") -> str:
         """Everything about the store's current state: its name (if any),
         entry/author counts, the size estimate (and whether it's over the
-        compression threshold — check this at session start), paused or
-        not, the last entry recorded, and the last control decision
-        (duplicate suppressed / paused skip / pause / resume). Pass
-        `name` if this session is using a named memory."""
+        compression threshold — check this at session start), the last
+        entry recorded, and the last control decision (currently:
+        duplicate suppressed). Pass `name` if this session is using a
+        named memory."""
         return json.dumps(_resolve(name).stats(), ensure_ascii=False)
 
     @mcp.tool()

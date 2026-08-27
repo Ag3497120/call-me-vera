@@ -13,7 +13,6 @@ Subcommands:
   vera search <query>               text search, results carry citation numbers
   vera compress --text "..." [--through <n>]
                                      store an AI-authored digest citing numbers
-  vera pause / vera resume          stop/restart recording for a burst of activity
   vera stats                        entries, size vs. compression threshold, state
   vera sync --remote <path>         merge two independently-grown stores
   vera claim-name <name>            name this memory so any session/app can resume it
@@ -199,28 +198,8 @@ def cmd_compress(args) -> int:
     return 0
 
 
-def cmd_pause(args) -> int:
-    """Stop `record` from saving content until `resume`."""
-    store = _open_store(args)
-    try:
-        _print(store.pause(by=getattr(args, "by", None) or "local"))
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_resume(args) -> int:
-    """Undo `pause` — `record` saves normally again."""
-    store = _open_store(args)
-    try:
-        _print(store.resume(by=getattr(args, "by", None) or "local"))
-    finally:
-        store.close()
-    return 0
-
-
 def cmd_stats(args) -> int:
-    """Entries, authors, size vs. compression threshold, pause state, last event."""
+    """Entries, authors, size vs. compression threshold, last event."""
     store = _open_store(args)
     try:
         _print(store.stats())
@@ -364,15 +343,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--lang", default="en")
     p.set_defaults(fn=cmd_compress)
 
-    p = sub.add_parser("pause", help="stop `record` from saving until `resume`", parents=[store_parent])
-    p.add_argument("--by", default="local", help="who paused it (recorded, not enforced)")
-    p.set_defaults(fn=cmd_pause)
-
-    p = sub.add_parser("resume", help="undo `pause`", parents=[store_parent])
-    p.add_argument("--by", default="local")
-    p.set_defaults(fn=cmd_resume)
-
-    p = sub.add_parser("stats", help="entries, size vs. threshold, pause state, last event", parents=[store_parent])
+    p = sub.add_parser("stats", help="entries, size vs. threshold, last event", parents=[store_parent])
     p.set_defaults(fn=cmd_stats)
 
     p = sub.add_parser("sync", help="sync two Vera stores (local ↔ Claude)", parents=[store_parent])

@@ -23,14 +23,11 @@ Everything lives in one SQLite file (default `.vera_store.db`, WAL mode):
   uncompressed tail is getting large, reads the raw entries, and writes a
   digest citing specific numbers. `through_n` marks how far it reaches.
   Also append-only.
-- **`control_log`** — what Vera decided *not* to save, and why: a
-  duplicate suppressed, a save skipped while paused, a pause/resume. Kept
-  separate from `event_log`'s content stream (a new row *type* there
-  would need a CHECK-constraint rebuild; a bookkeeping table doesn't).
-  Also append-only.
-- **`session_control`** — one row, the pause switch (`vera pause` /
-  `vera resume`). Persists across a restart on purpose; deliberately
-  **not** carried by `sync` — pausing is a local, per-store decision.
+- **`control_log`** — what Vera decided *not* to save, and why:
+  currently just a duplicate suppressed. Kept separate from
+  `event_log`'s content stream (a new row *type* there would need a
+  CHECK-constraint rebuild; a bookkeeping table doesn't). Also
+  append-only.
 
 Both/all authors point at the same file by default — no explicit sync
 needed while agents share a filesystem. `vera sync` merges two
@@ -129,14 +126,14 @@ anything routed through a name.
 
 | Tool | What it does |
 |------|---------------|
-| `vera_session_start(lang)` | **call this first, every session** — the latest digest (if any) plus recent numbered entries, plus the agent protocol |
-| `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang, model_timestamp)` | **call this when the user says "Vera"** — the structured, append-only, numbered capture; a repeat within the same connection is auto-suppressed |
-| `vera_lookup(n)` | fetch one entry by its citation number |
-| `vera_search(query, k)` | text search over entries and digests, results carry citation numbers |
-| `vera_compress(text, through_n, author, lang)` | store an AI-authored digest citing specific entry numbers |
-| `vera_pause(by)` / `vera_resume(by)` | stop/restart `vera_record` saving content |
-| `vera_stats()` | entries, authors, size vs. compression threshold, pause state, last event/control decision |
-| `vera_sync(remote_path)` | merge another store into this one |
+| `vera_guide(lang, name)` | full onboarding explanation, any supported language |
+| `vera_session_start(lang, name)` | **call this first, every session** — the latest digest (if any) plus recent numbered entries, plus the agent protocol; pass `name` to resume a named memory |
+| `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang, model_timestamp, name)` | **call this when the user says "Vera"** — the structured, append-only, numbered capture; a repeat within the same connection is auto-suppressed |
+| `vera_lookup(n, name)` | fetch one entry by its citation number |
+| `vera_search(query, k, name)` | text search over entries and digests, results carry citation numbers |
+| `vera_compress(text, through_n, author, lang, name)` | store an AI-authored digest citing specific entry numbers |
+| `vera_stats(name)` | entries, authors, size vs. compression threshold, last event/control decision |
+| `vera_sync(remote_path, name)` | merge another store into this one |
 | `vera_claim_name(name, source_name)` | name a memory so any session/app can resume it via `name=` on any other call |
 | `vera_list_named_stores()` | list every claimed memory name |
 

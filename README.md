@@ -127,7 +127,6 @@ vera record --request "..."     the structured "Vera" capture (auto-dedups a ret
 vera lookup <n>                 fetch one entry by its citation number
 vera search <query>             text search, results carry citation numbers
 vera compress --text "..."      store an AI-authored digest citing entry numbers
-vera pause / vera resume        stop/restart recording for a burst of activity
 vera stats                      entries, size vs. compression threshold, state
 vera sync --remote <path>       merge two independently-grown stores
 vera claim-name <name>          name this memory so any session/app can resume it
@@ -157,8 +156,7 @@ a named memory. Full reference: [docs/VERA_SESSION.md](docs/VERA_SESSION.md).
   same `vera_record` call — different models, different clocks — is
   recognized by a fingerprint over (author, session, request, result) and
   suppressed, not duplicated; the suppression itself is logged, never
-  silently dropped. `vera pause` stops recording for a burst of activity
-  you don't want captured turn-by-turn.
+  silently dropped.
 
 ## License
 

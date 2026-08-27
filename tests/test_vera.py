@@ -3,9 +3,8 @@ deliberately does NOT interpret what it stores: two authors ("claude" and
 "local") writing into the *same* store file stay correctly tagged and both
 readable; every entry gets a stable citation number (lookup()); an agent
 re-sending the same save is suppressed (not duplicated) and the decision is
-itself observable; pause/resume actually stops/restarts recording; a
-compression digest replaces the raw tail in get_project_state() without
-deleting anything; the size estimate reports whether the uncompressed tail
+itself observable; a compression digest replaces the raw tail in
+get_project_state() without deleting anything; the size estimate reports whether the uncompressed tail
 is over threshold; sync merges two independently-grown stores including
 digests; the append-only guarantee and the schema migration are enforced at
 the database level, not by convention; and every supported guide language
@@ -101,23 +100,6 @@ def test_different_content_not_suppressed(store):
     assert r1["turn_id"] != r2["turn_id"]
 
 
-def test_pause_blocks_recording_and_resume_restores_it(store):
-    """pause() must stop record_turn() from saving content (returning a
-    clear skipped marker, not silently succeeding), and resume() must
-    restore normal recording."""
-    store.pause(by="local")
-    assert store.is_paused() is True
-
-    result = store.record_turn(author="claude", request="should be skipped", result="n/a")
-    assert result == {"paused": True, "skipped": True}
-    assert store.stats()["paused_skips_total"] == 1
-
-    store.resume(by="local")
-    assert store.is_paused() is False
-
-    result2 = store.record_turn(author="claude", request="recorded after resume", result="done")
-    assert "paused" not in result2
-    assert "duplicate_suppressed" not in result2
 
 
 def test_search_finds_entries_and_digests(store):
@@ -283,7 +265,7 @@ def test_guide_all_languages_render_and_are_current():
     the old nested `vera session <cmd>` form (this CLI is flattened to
     `vera <cmd>`), and any leftover mention of the removed contradiction-
     detection / constraint-tracking concepts."""
-    empty_state = {"digest": None, "recent_entries": [], "recording_paused": False,
+    empty_state = {"digest": None, "recent_entries": [],
                     "size": {"uncompressed_entries": 0, "estimated_tokens": 0,
                              "over_threshold": False, "since_n": 0}}
     for code in SUPPORTED_LANGUAGES:

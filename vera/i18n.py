@@ -165,7 +165,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Ask for the guide in another language and Vera answers in it — "
@@ -209,7 +209,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start ・ vera record ・ vera guide [--lang xx] ・ vera lookup <n> ・ "
-            "vera search <query> ・ vera compress --text \"...\" ・ vera pause / vera resume ・ vera stats"
+            "vera search <query> ・ vera compress --text \"...\" ・ vera stats"
         ),
         "switch": (
             "他の言語でガイドを見たいときは、そう伝えるだけで構いません（例:"
@@ -250,7 +250,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "想用其他语言看指南，直接说出来就行（例如 “Start Vera guide in German”）。"
@@ -297,7 +297,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Pide la guía en otro idioma y Vera responderá en él — p. ej. "
@@ -348,7 +348,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Demandez le guide dans une autre langue et Vera répondra dans "
@@ -400,7 +400,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Fragen Sie nach dem Guide in einer anderen Sprache, und Vera "
@@ -444,7 +444,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "다른 언어로 가이드를 보고 싶다면 그렇게 요청하면 됩니다 (예: "
@@ -493,7 +493,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Peça o guia em outro idioma e o Vera responde nele — ex.: "
@@ -542,7 +542,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Попросите руководство на другом языке — Vera ответит на нём, "
@@ -592,7 +592,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "Chiedi la guida in un'altra lingua e Vera risponderà in quella "
@@ -638,7 +638,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "اطلب الدليل بلغة أخرى وسيجيب Vera بها — مثل \"Start Vera guide in "
@@ -683,7 +683,7 @@ _GUIDE: Dict[str, Dict[str, Any]] = {
         ],
         "commands": (
             "vera start · vera record · vera guide [--lang xx] · vera lookup <n> · "
-            "vera search <query> · vera compress --text \"...\" · vera pause / vera resume · vera stats"
+            "vera search <query> · vera compress --text \"...\" · vera stats"
         ),
         "switch": (
             "किसी अन्य भाषा में गाइड माँगें और Vera उसी में जवाब देगा — जैसे "
