@@ -14,10 +14,12 @@ Author is always "claude" or "local". Sync between stores merges by author.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
 import sqlite3
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -465,11 +467,38 @@ _EVENT_LOG_MIGRATIONS = [
 ]
 
 
+def _locked(fn):
+    """Serialize every public VeraStore method through self._lock.
+
+    check_same_thread=False on the connection (see __init__) only turns
+    off Python's OWN same-thread guard — it does not make sqlite3.Connection
+    safe for genuinely concurrent use from multiple threads. An MCP server
+    can dispatch two tool calls to different worker threads without one
+    finishing first (a client that pipelines requests, or a model that
+    issues parallel tool calls in one turn), and two threads calling
+    .execute() on the same Connection at once corrupts it outright
+    (sqlite3.InterfaceError: "bad parameter or other API misuse") rather
+    than just racing logically. A single re-entrant lock — cheap for a
+    tool used at conversational request rates, not a high-throughput
+    database — makes every public method atomic with respect to every
+    other one; RLock lets a locked method (e.g. record_turn) call another
+    locked method (e.g. save_session) on the same thread without deadlock."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 class VeraStore:
     """SQLite-backed persistent session store with extraction + consistency."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
+        # Guards every public method (see _locked above) — set before
+        # anything else touches the connection, including the migration
+        # a few lines down.
+        self._lock = threading.RLock()
         # check_same_thread=False: an MCP server dispatches each sync tool
         # call through anyio.to_thread.run_sync, which may pick a different
         # worker thread per call (mcp SDK v2's executor does; v1's didn't
@@ -512,6 +541,7 @@ class VeraStore:
 
     # -- public API --------------------------------------------------------
 
+    @_locked
     def add_event(
         self,
         event: SessionEvent,
@@ -560,6 +590,7 @@ class VeraStore:
         self.summarize(event.session_id)
         return event.session_id
 
+    @_locked
     def save_session(
         self,
         author: str,
@@ -587,6 +618,7 @@ class VeraStore:
         ))
         return sid
 
+    @_locked
     def summarize(self, session_id: str) -> SessionSummary | None:
         """Extract summary from raw event. Returns None if no event found."""
         row = self._conn.execute(
@@ -653,6 +685,7 @@ class VeraStore:
         self._conn.commit()
         return summary
 
+    @_locked
     def search(self, query: str, k: int = 10) -> List[Dict[str, Any]]:
         """Text search across events + summaries + facts."""
         results: List[Dict[str, Any]] = []
@@ -709,6 +742,7 @@ class VeraStore:
 
         return results[:k]
 
+    @_locked
     def check_consistency(
         self, current_action: str, current_proposal: str = ""
     ) -> Dict[str, Any]:
@@ -737,6 +771,7 @@ class VeraStore:
             }
         return {"status": "OK", "constraints_checked": len(constraints)}
 
+    @_locked
     def list_facts(self, category: str = "") -> List[Dict[str, Any]]:
         """List all stored facts."""
         if category:
@@ -749,6 +784,7 @@ class VeraStore:
             ).fetchall()
         return [{"id": r[0], "text": r[1], "certainty": r[2], "source": r[3]} for r in rows]
 
+    @_locked
     def add_constraint(self, text: str, source_session: str = "") -> str:
         """Add a constraint. Returns constraint ID."""
         cid = str(uuid.uuid4())[:8]
@@ -759,6 +795,7 @@ class VeraStore:
         self._conn.commit()
         return cid
 
+    @_locked
     def get_constraints(self) -> List[Dict[str, Any]]:
         """List all active constraints."""
         rows = self._conn.execute(
@@ -769,6 +806,7 @@ class VeraStore:
             for r in rows
         ]
 
+    @_locked
     def list_contradictions(self, resolved_only: bool = False) -> List[Dict[str, Any]]:
         """List all contradictions."""
         where = "WHERE resolved=0" if not resolved_only else ""
@@ -780,6 +818,7 @@ class VeraStore:
             for r in rows
         ]
 
+    @_locked
     def get_session(self, session_id: str) -> Dict[str, Any] | None:
         """Get a single session event."""
         row = self._conn.execute(
@@ -850,10 +889,12 @@ class VeraStore:
         self._conn.commit()
         return cid
 
+    @_locked
     def is_paused(self) -> bool:
         row = self._conn.execute("SELECT paused FROM session_control WHERE id=1").fetchone()
         return bool(row and row[0])
 
+    @_locked
     def pause(self, by: str = "local") -> Dict[str, Any]:
         """Stop record_turn() from saving content until resume() — the
         "Vera pause" / "before bulk agent work" case. The attempt itself is
@@ -868,6 +909,7 @@ class VeraStore:
         self._log_control("pause", author=by)
         return {"paused": True, "paused_at": now, "paused_by": by}
 
+    @_locked
     def resume(self, by: str = "local") -> Dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
@@ -878,6 +920,7 @@ class VeraStore:
         self._log_control("resume", author=by)
         return {"paused": False, "resumed_at": now}
 
+    @_locked
     def record_turn(
         self,
         author: str,
@@ -949,6 +992,7 @@ class VeraStore:
         self._conn.commit()
         return {"turn_id": turn_id, "event_ids": event_ids}
 
+    @_locked
     def add_interpretation(self, text: str, author: str = "vera", lang: str = "en") -> str:
         """Record a standalone snapshot of how the codebase is currently
         understood, not tied to a specific turn — comparable over time via
@@ -958,6 +1002,7 @@ class VeraStore:
         self._conn.commit()
         return eid
 
+    @_locked
     def get_latest_interpretation(self, n: int = 2) -> List[Dict[str, Any]]:
         """Most recent interpretation snapshots, newest first — compare [0]
         (current) against [1] (previous) to see codebase-understanding drift."""
@@ -970,6 +1015,7 @@ class VeraStore:
             for r in rows
         ]
 
+    @_locked
     def get_event_log(self, turn_id: str = "", type_: str = "", k: int = 50) -> List[Dict[str, Any]]:
         """Raw event_log rows, optionally filtered by turn or type, newest first."""
         where, params = [], []
@@ -990,6 +1036,7 @@ class VeraStore:
             for r in rows
         ]
 
+    @_locked
     def get_project_state(self, recent_n: int = 8) -> Dict[str, Any]:
         """Everything a new session needs before starting work: the latest
         codebase interpretation, active constraints, open contradictions,
@@ -1009,6 +1056,7 @@ class VeraStore:
             "recording_paused": self.is_paused(),
         }
 
+    @_locked
     def sync(self, other_path: str | Path) -> Dict[str, Any]:
         """Merge another VeraStore into this one. Author-tagged merge."""
         other = VeraStore(other_path)
@@ -1132,6 +1180,7 @@ class VeraStore:
         self._conn.commit()
         return merged
 
+    @_locked
     def report(self) -> Dict[str, Any]:
         """Store statistics."""
         n_events = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
@@ -1151,6 +1200,7 @@ class VeraStore:
             "authors": authors,
         }
 
+    @_locked
     def status(self) -> Dict[str, Any]:
         """Live session status: pause state, the last event actually
         recorded, the last control decision (a duplicate suppressed, a

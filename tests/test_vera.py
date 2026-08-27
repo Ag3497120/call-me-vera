@@ -364,3 +364,44 @@ def test_sync_carries_control_log_and_new_event_log_columns(tmp_path):
 
     assert merged["inserted"] == 1  # only the one real event, not the suppressed duplicate
     assert a_status["duplicates_suppressed_total"] == 1  # control_log entry carried over
+
+
+def test_concurrent_record_turn_is_thread_safe(store):
+    """Regression: sqlite3.Connection is not safe for genuinely concurrent
+    use from multiple threads even with check_same_thread=False (that flag
+    only disables Python's same-thread *guard*) — an MCP server can
+    dispatch two tool calls to different worker threads without either
+    finishing first (a client pipelining requests, or parallel tool calls
+    in one model turn). Before the store-wide lock, 10 threads calling
+    record_turn() with identical content at the same instant crashed most
+    of them outright (sqlite3.InterfaceError: "bad parameter or other API
+    misuse") and let duplicates through despite the fingerprint check.
+    Must now be fully serialized: no exceptions, exactly one real save,
+    the rest suppressed."""
+    import threading
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(10)
+
+    def worker():
+        barrier.wait()  # release all threads at (as close as possible to) the same instant
+        try:
+            results.append(store.record_turn(author="claude", request="race test", result="same result"))
+        except Exception as e:  # noqa: BLE001 - deliberately broad, this is the regression itself
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not any(t.is_alive() for t in threads), "a thread hung — possible deadlock"
+    assert errors == [], f"concurrent calls raised: {errors}"
+    assert len(results) == 10
+    n_real = sum(1 for r in results if not r.get("duplicate_suppressed"))
+    n_suppressed = sum(1 for r in results if r.get("duplicate_suppressed"))
+    assert n_real == 1, f"expected exactly 1 real save, got {n_real}"
+    assert n_suppressed == 9, f"expected 9 suppressed, got {n_suppressed}"
+    assert len({r["turn_id"] for r in results}) == 1  # everyone agrees on the one real turn_id
