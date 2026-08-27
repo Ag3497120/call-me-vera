@@ -405,3 +405,36 @@ def test_concurrent_record_turn_is_thread_safe(store):
     assert n_real == 1, f"expected exactly 1 real save, got {n_real}"
     assert n_suppressed == 9, f"expected 9 suppressed, got {n_suppressed}"
     assert len({r["turn_id"] for r in results}) == 1  # everyone agrees on the one real turn_id
+
+
+def test_migration_survives_concurrent_alter_from_another_process(store):
+    """_migrate_event_log_columns() isn't fully race-proof against a
+    SECOND PROCESS migrating the same pre-existing store at (as near as
+    makes no difference) the same instant — self._lock only serializes
+    threads within one process, and the PRAGMA-then-ALTER sequence isn't
+    one atomic transaction. If that happens, SQLite raises "duplicate
+    column name: ..." for the column the other process just committed
+    first; this must be swallowed as success (the outcome we wanted
+    happened, just via a different process), not crash __init__. This
+    test pins down the exact exception SQLite raises for that case — if
+    a future SQLite/Python version ever changes that message, the
+    `"duplicate column name" not in str(exc): raise` check in
+    _migrate_event_log_columns would silently stop catching it, and this
+    test is what would catch that regression."""
+    import sqlite3
+
+    # First ALTER succeeds (this is what "the other process" would do).
+    store._conn.execute("ALTER TABLE event_log ADD COLUMN _test_migration_probe TEXT")
+    store._conn.commit()
+
+    # Second attempt to add the identical column is exactly what our own
+    # process's _migrate_event_log_columns would do if its PRAGMA read
+    # happened before the other process's ALTER committed.
+    with pytest.raises(sqlite3.OperationalError) as exc_info:
+        store._conn.execute("ALTER TABLE event_log ADD COLUMN _test_migration_probe TEXT")
+    assert "duplicate column name" in str(exc_info.value)
+
+    # And the store must still be fully usable afterward — this is the
+    # actual property that matters, not the exception text itself.
+    r = store.record_turn(author="claude", request="post-race sanity check", result="ok")
+    assert "duplicate_suppressed" not in r

@@ -533,10 +533,25 @@ class VeraStore:
         self.session_id = str(uuid.uuid4())
 
     def _migrate_event_log_columns(self) -> None:
+        # Not fully race-proof against a second PROCESS migrating the same
+        # pre-existing store at (as near as makes no difference) the same
+        # instant — self._lock only serializes threads within this one
+        # process, and PRAGMA table_info() plus each ALTER aren't wrapped
+        # in one atomic transaction. If another process's ALTER commits
+        # between our read and ours, SQLite raises "duplicate column
+        # name:" for the column that's now already there — caught and
+        # treated as success (the outcome we wanted happened, just via a
+        # different process) rather than crashing __init__; any other
+        # OperationalError still propagates.
         existing = {row[1] for row in self._conn.execute("PRAGMA table_info(event_log)")}
         for name, coltype in _EVENT_LOG_MIGRATIONS:
-            if name not in existing:
+            if name in existing:
+                continue
+            try:
                 self._conn.execute(f"ALTER TABLE event_log ADD COLUMN {name} {coltype}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
         self._conn.commit()
 
     # -- public API --------------------------------------------------------
