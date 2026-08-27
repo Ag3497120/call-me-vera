@@ -8,6 +8,8 @@ writing one memory log instead. Vera does not interpret what it stores:
 no fact extraction, no contradiction detection. Every entry just gets a
 citable number; making sense of it is the agent's job.
 
+![Vera demo](docs/assets/demo.gif)
+
 ```
 Claude ──┐
 Local ────┼── same .vera_store.db (SQLite, WAL) ── numbered, append-only memory
