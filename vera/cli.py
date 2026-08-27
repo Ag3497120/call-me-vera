@@ -274,10 +274,19 @@ def cmd_names(args) -> int:
 
 
 def cmd_mcp(args) -> int:
-    """Start the Vera MCP server."""
+    """Start the Vera MCP server. With --name, the server's own default
+    store IS the named memory (~/.vera/stores/<name>.db) — every tool
+    call operates on it automatically, with no need for the connected
+    agent to pass `name` itself on each call. This is how an MCP
+    registration (claude mcp add vera -- vera mcp --name X) converges
+    with other registrations pointed at the same name, permanently,
+    rather than relying on each session remembering to pass it."""
     from .mcp_tools import vera_serve
+    from .store import resolve_named_path
 
-    return vera_serve(str(_store_path(args)))
+    name = (getattr(args, "name", None) or "").strip()
+    path = resolve_named_path(name) if name else _store_path(args)
+    return vera_serve(str(path))
 
 
 def main(argv: Optional[list] = None) -> int:
