@@ -1,9 +1,9 @@
-"""Vera MCP tools — session capture & persistent memory for AI coding agents.
+"""Vera MCP tools — shared, append-only, citable memory for AI coding agents.
 
-Exposes Vera as MCP tools so Claude Code (or any agent) can record sessions,
-search history, check consistency against constraints, and sync stores.
+Deliberately small: vera_guide explains everything else, so the tool
+surface itself stays close to just "read the memory" / "write to it" /
+"compress it when it's getting large" / "pause/resume" / "sync".
 
-Usage from Claude: call `vera_save_session` / `vera_summarize` / etc.
 MCP server name: "vera"
 """
 from __future__ import annotations
@@ -39,132 +39,26 @@ def vera_serve(store_path: str) -> int:
     mcp = FastMCP("vera")
 
     @mcp.tool()
-    def vera_save_session(
-        user_prompt: str,
-        tool_calls: str = "[]",
-        tool_results: str = "[]",
-        git_diff: str = "",
-        actions: str = "[]",
-        observations: str = "[]",
-        author: str = "claude",
-        working_directory: str = "",
-    ) -> str:
-        """Capture a session event. Records the user prompt, tool calls,
-        results, git diff, actions taken, and observations made — all
-        tagged with an author (\"claude\" or \"local\"). A summary with
-        extracted facts/decisions/constraints is auto-generated."""
-        try:
-            tc = json.loads(tool_calls) if tool_calls else []
-            tr = json.loads(tool_results) if tool_results else []
-            ac = json.loads(actions) if actions else []
-            ob = json.loads(observations) if observations else []
-        except (json.JSONDecodeError, TypeError) as exc:
-            return json.dumps({"error": f"invalid JSON: {exc}"})
-
-        sid = store.save_session(
-            author=author,
-            user_prompt=user_prompt,
-            tool_calls=tc,
-            tool_results=tr,
-            git_diff=git_diff,
-            actions=ac,
-            observations=ob,
-            working_directory=working_directory or "",
-        )
-        return json.dumps({"session_id": sid, "saved": True}, ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_summarize(session_id: str) -> str:
-        """Generate a summary for a session: facts, decisions, constraints,
-        todos, unresolved items. Returns JSON."""
-        s = store.summarize(session_id)
-        if not s:
-            return json.dumps({"error": "session not found"})
-        return json.dumps({
-            "session_id": s.session_id,
-            "facts": s.facts,
-            "decisions": s.decisions,
-            "constraints": s.constraints,
-            "todos": s.todos,
-            "unresolved": s.unresolved,
-        }, ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_search(query: str, k: int = 10) -> str:
-        """Search across all Vera records (events, facts, constraints, summaries)."""
-        results = store.search(query, k=k)
-        return json.dumps(results, ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_check_consistency(
-        current_action: str,
-        current_proposal: str = "",
-    ) -> str:
-        """Check active constraints against the current action/proposal.
-        Returns status (\"OK\" or \"CONTRADICTION\") with details."""
-        return json.dumps(store.check_consistency(current_action, current_proposal), ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_list_facts(category: str = "") -> str:
-        """List all stored facts. Optionally filter by category."""
-        return json.dumps(store.list_facts(category=category), ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_add_constraint(text: str) -> str:
-        """Add a project constraint to Vera's memory."""
-        cid = store.add_constraint(text)
-        return json.dumps({"constraint_id": cid, "text": text}, ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_get_constraints() -> str:
-        """List all active constraints."""
-        return json.dumps(store.get_constraints(), ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_list_contradictions(resolved_only: bool = False) -> str:
-        """List contradictions between actions and constraints."""
-        return json.dumps(store.list_contradictions(resolved_only=resolved_only), ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_get_session(session_id: str) -> str:
-        """Get a single session event with full details."""
-        ev = store.get_session(session_id)
-        if not ev:
-            return json.dumps({"error": "session not found"})
-        return json.dumps(ev, ensure_ascii=False, indent=2)
-
-    @mcp.tool()
-    def vera_sync(local_path: str, remote_path: str) -> str:
-        """Merge two Vera stores. local_path is this store; remote_path is the other."""
-        merged = store.sync(remote_path)
-        return json.dumps({"synced": True, "merged": merged}, ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_stats() -> str:
-        """Vera store statistics (events, facts, constraints, contradictions)."""
-        return json.dumps(store.report(), ensure_ascii=False)
-
-    @mcp.tool()
     def vera_guide(lang: str = "en") -> str:
         """Full onboarding explanation of Vera and how an agent should
-        behave in this session: what Vera is, how to call vera_session_start
-        and vera_record, the agent behavior protocol, and available
-        commands — in the requested language (code or name, e.g. "de",
-        "German", "Deutsch", or a phrase like "ドイツ語"; unrecognized falls
-        back to English). Call this once to learn how to use Vera; call
-        vera_session_start at the beginning of every session instead — it's
-        shorter and carries this project's actual current state."""
+        behave: what Vera is, how to call vera_session_start and
+        vera_record, the agent behavior protocol, and available tools —
+        in the requested language (code or name, e.g. "de", "German",
+        "Deutsch", or a phrase like "ドイツ語"; unrecognized falls back to
+        English). Call this once to learn how to use Vera; call
+        vera_session_start at the beginning of every session instead —
+        it's shorter and carries this store's actual current state."""
         return render_guide(lang)
 
     @mcp.tool()
     def vera_session_start(lang: str = "en") -> str:
         """Call this BEFORE doing any work in a new session. Returns the
-        project's current state — latest codebase interpretation, active
-        constraints, open contradictions, recent decisions/changes/
-        unresolved items/results — plus the agent behavior protocol, in the
-        requested language. This is the hand-off point between agents/
-        sessions: read it instead of asking the user to re-explain the
-        project."""
+        latest compression digest (if one exists) plus everything
+        recorded since it — or, if there's no digest yet, the most recent
+        entries — each with a citation number, plus the agent behavior
+        protocol, in the requested language. This is the hand-off point
+        between agents/sessions: read it instead of asking the user to
+        re-explain the project."""
         state = store.get_project_state()
         return render_project_state(state, lang)
 
@@ -185,13 +79,14 @@ def vera_serve(store_path: str) -> int:
         the turn into REQUEST (what was asked), CHANGE (what you did, and
         `files` as a JSON array of paths touched), REASON (why you
         structured it that way), RESULT (what happened), interpretation
-        (your current understanding of the codebase — also say this part
-        out loud to the user in your reply), and unresolved (anything left
-        open). Every non-empty field becomes its own permanent, append-only
-        record — Vera never overwrites a past event.
+        (your own current understanding — also say it out loud to the
+        user in your reply), and unresolved (anything left open). Vera
+        does not interpret any of this; every non-empty field becomes its
+        own permanent, numbered, append-only record for whichever agent
+        reads it next.
 
-        Pass `model_timestamp` (ISO 8601, your own clock) if you have one —
-        it sharpens duplicate detection across agents with different
+        Pass `model_timestamp` (ISO 8601, your own clock) if you have one
+        — it sharpens duplicate detection across agents with different
         clocks; if omitted, Vera buckets its own receive time instead.
         Calling this again with the same author/request/result within a
         few seconds is recognized as the same save arriving twice and is
@@ -213,13 +108,46 @@ def vera_serve(store_path: str) -> int:
         return json.dumps(result_dict, ensure_ascii=False)
 
     @mcp.tool()
+    def vera_lookup(n: int) -> str:
+        """Fetch one memory entry by its citation number — what a
+        compression digest's "per #12" or a vera_search hit's "n" refers
+        to."""
+        entry = store.lookup(n)
+        if entry is None:
+            return json.dumps({"error": f"no entry #{n}"})
+        return json.dumps(entry, ensure_ascii=False)
+
+    @mcp.tool()
+    def vera_search(query: str, k: int = 10) -> str:
+        """Text search over raw memory entries and compression digests,
+        newest first. Every hit carries its citation number ("n") for
+        vera_lookup."""
+        return json.dumps(store.search(query, k=k), ensure_ascii=False)
+
+    @mcp.tool()
+    def vera_compress(text: str, through_n: int = 0, author: str = "claude", lang: str = "en") -> str:
+        """Store a compressed digest of the memory up to and including
+        entry #through_n (0 or omitted = everything recorded so far).
+        Vera never writes this itself — call vera_stats first; if
+        `size.over_threshold` is true, the uncompressed tail is large
+        enough that handing it to a fresh agent risks overflowing its
+        context, and it's worth telling the user that before writing one.
+        Read the raw entries (vera_search / vera_lookup), write a digest
+        that cites specific numbers ("per #3, #7, #15: the project uses
+        X..."), and pass that text here. Nothing gets deleted — the raw
+        entries stay reachable via vera_lookup — but vera_session_start
+        will show this digest plus only what's recorded after it, instead
+        of the full history, until a newer digest supersedes it."""
+        return json.dumps(store.add_digest(text, through_n=through_n, author=author, lang=resolve_lang(lang)), ensure_ascii=False)
+
+    @mcp.tool()
     def vera_pause(by: str = "local") -> str:
         """Stop vera_record from saving content until vera_resume is
         called — use this before a burst of agent activity you don't want
         recorded turn-by-turn (e.g. bulk automated processing), then call
         vera_resume and vera_record once at the end for the result that
         matters. Skipped attempts while paused are still logged (see
-        vera_status) so a gap is traceable, not silently missing. Persists
+        vera_stats) so a gap is traceable, not silently missing. Persists
         across a server restart until explicitly resumed."""
         return json.dumps(store.pause(by=by), ensure_ascii=False)
 
@@ -229,34 +157,20 @@ def vera_serve(store_path: str) -> int:
         return json.dumps(store.resume(by=by), ensure_ascii=False)
 
     @mcp.tool()
-    def vera_status() -> str:
-        """Live session status: paused or not, the last event actually
-        recorded, the last control decision (duplicate suppressed / paused
-        skip / pause / resume), and running counts of each — the "why
-        isn't there an event here" view."""
-        return json.dumps(store.status(), ensure_ascii=False)
+    def vera_stats() -> str:
+        """Everything about the store's current state: entry/author
+        counts, the size estimate (and whether it's over the compression
+        threshold — check this at session start), paused or not, the last
+        entry recorded, and the last control decision (duplicate
+        suppressed / paused skip / pause / resume)."""
+        return json.dumps(store.stats(), ensure_ascii=False)
 
     @mcp.tool()
-    def vera_add_interpretation(text: str, author: str = "vera", lang: str = "en") -> str:
-        """Record a standalone snapshot of how the codebase is currently
-        understood, independent of any specific turn — comparable later via
-        vera_get_interpretation() to see how understanding has shifted."""
-        eid = store.add_interpretation(text, author=author, lang=resolve_lang(lang))
-        return json.dumps({"event_id": eid}, ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_get_interpretation(n: int = 2) -> str:
-        """Most recent codebase-interpretation snapshots, newest first —
-        compare index 0 (current) against index 1 (previous) to see how the
-        understanding of the codebase has changed."""
-        return json.dumps(store.get_latest_interpretation(n=n), ensure_ascii=False)
-
-    @mcp.tool()
-    def vera_get_event_log(turn_id: str = "", type: str = "", k: int = 50) -> str:
-        """Raw append-only event_log rows, optionally filtered by turn_id
-        or type (request|change|decision|result|observation|assumption|
-        unresolved|interpretation), newest first."""
-        return json.dumps(store.get_event_log(turn_id=turn_id, type_=type, k=k), ensure_ascii=False)
+    def vera_sync(remote_path: str) -> str:
+        """Merge another Vera store (e.g. from a different machine that
+        never shared this filesystem) into this one. Append-only and
+        idempotent on both sides."""
+        return json.dumps(store.sync(remote_path), ensure_ascii=False)
 
     mcp.run()
     return 0

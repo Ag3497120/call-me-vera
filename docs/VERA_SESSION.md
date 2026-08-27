@@ -7,45 +7,49 @@ server, and say **"Vera guide"** to your agent instead of reading this.
 
 ## What's actually stored
 
-Everything lives in one SQLite file (default `.vera_store.db`, WAL mode),
-in two layers:
+Everything lives in one SQLite file (default `.vera_store.db`, WAL mode):
 
-- **`events` / `facts` / `constraints` / `contradictions`** — the raw
-  capture pipeline. `save_session()` records one event; `summarize()`
-  extracts facts/decisions/constraints/todos/unresolved via regex
-  (idempotent — content-hashed ids, re-running never duplicates rows).
-  `check_consistency()` matches a proposed action/change against active
-  constraints by keyword family (`stdlib`, `no external`, `local-first`,
-  `deterministic` today — add more as your project's own recurring
-  constraints show up). This is what powers `vera search` and `vera check`.
-
-- **`event_log`** — the structured, per-turn log `record_turn()` writes.
-  One call fans out into separate `request` / `change` / `decision` /
-  `result` / `interpretation` / `unresolved` rows (also `observation` /
+- **`event_log`** — the one content table. Every "Vera" turn fans out
+  into separate `request` / `change` / `decision` / `result` /
+  `interpretation` / `unresolved` rows (also `observation` /
   `assumption` are valid types, reserved for finer-grained future use)
-  sharing one `turn_id`, tagged `author: claude | local | vera`.
-  **Enforced append-only at the database level** — SQLite triggers reject
-  `UPDATE`/`DELETE` on this table outright, not just "please don't call
-  that." `events.add_event()` similarly raises on a reused `session_id`
-  instead of silently overwriting. `get_project_state()` reads the most
-  recent rows here (plus active constraints/open contradictions) to build
-  the PROJECT CONTEXT block `vera_session_start` returns.
-
+  sharing one `turn_id`, tagged `author: claude | local | vera`. SQLite's
+  own `rowid` (implicit — `id` is a TEXT primary key, not `INTEGER`) is
+  the citation number every entry gets for free: `#12` means "the row
+  with rowid 12." **Enforced append-only at the database level** —
+  `UPDATE`/`DELETE` raise via SQLite triggers, not just "please don't."
+- **`digests`** — AI-authored compressed summaries. Vera never writes one
+  itself; an agent judges (via `vera_stats`' size estimate) that the
+  uncompressed tail is getting large, reads the raw entries, and writes a
+  digest citing specific numbers. `through_n` marks how far it reaches.
+  Also append-only.
 - **`control_log`** — what Vera decided *not* to save, and why: a
   duplicate suppressed, a save skipped while paused, a pause/resume. Kept
-  separate from `event_log`'s content stream (adding a new row *type*
-  there would need a CHECK-constraint rebuild; a bookkeeping table
-  doesn't), also append-only, also merged by `sync()`.
-
+  separate from `event_log`'s content stream (a new row *type* there
+  would need a CHECK-constraint rebuild; a bookkeeping table doesn't).
+  Also append-only.
 - **`session_control`** — one row, the pause switch (`vera pause` /
   `vera resume`). Persists across a restart on purpose; deliberately
-  **not** carried by `sync()` — pausing is a local, per-store decision.
+  **not** carried by `sync` — pausing is a local, per-store decision.
 
 Both/all authors point at the same file by default — no explicit sync
 needed while agents share a filesystem. `vera sync` merges two
 independently-grown stores for the case where they never did (a
 genuinely different machine); it's idempotent (a second sync is a no-op)
-and carries the legacy tables, `event_log`, and `control_log`.
+and carries `event_log`, `digests`, and `control_log`.
+
+## No interpretation
+
+There is deliberately no fact extraction, constraint tracking, or
+contradiction detection anywhere in this codebase. An earlier version had
+all three (regex-based extraction feeding a keyword contradiction
+checker); both were removed. Deciding what a piece of text means, or
+whether it contradicts something recorded earlier, is exactly the kind of
+judgment an LLM does well and a fixed rule set does not — so that
+judgment belongs to whichever agent reads the memory, every time, not to
+a heuristic baked into Vera. The one thing Vera does judge is structural,
+not semantic: whether the uncompressed memory has grown past a character
+count.
 
 ### Duplicate detection
 
@@ -65,25 +69,37 @@ identical `vera record` CLI invocations run as separate processes (and
 thus separate `session_id`s) will **not** dedup against each other, even
 seconds apart. The problem this solves is an agent retrying a tool call
 within one running MCP server connection, not a human/script rerunning a
-command on purpose — see `vera_status`/`vera status` for what actually
+command on purpose — see `vera_stats`/`vera stats` for what actually
 happened in the current process.
+
+### Compression
+
+`vera_stats`'s `size` field reports `uncompressed_entries`,
+`uncompressed_chars`, `estimated_tokens` (a rough `chars/4` heuristic —
+not exact for any real tokenizer, just a proxy), and `over_threshold`
+against `threshold_tokens` (default 50,000). The count only covers what's
+after the latest digest's `through_n` — the actual "how much would a
+fresh agent have to load" question. The agent protocol tells the agent to
+check this at session start; if it's over threshold, the agent reads the
+raw entries, writes a digest citing the numbers it covers, tells the
+user, and calls `vera_compress`. `vera_session_start` then shows that
+digest plus only what's recorded after it, instead of the full history —
+but nothing is deleted; every cited number stays reachable with
+`vera_lookup`.
 
 ## Tools (MCP)
 
 | Tool | What it does |
 |------|---------------|
 | `vera_guide(lang)` | full onboarding explanation, any supported language |
-| `vera_session_start(lang)` | **call this first, every session** — current interpretation, active constraints, open contradictions, recent decisions/changes/unresolved/results, plus the agent protocol |
-| `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang, model_timestamp)` | **call this when the user says "Vera"** — the structured, append-only capture; a repeat within the same connection is auto-suppressed, not double-saved |
-| `vera_pause(by)` / `vera_resume(by)` | stop/restart `vera_record` saving content — use before a burst of activity you don't want recorded turn-by-turn |
-| `vera_status()` | live state: paused or not, last event, last suppression/pause decision, running counts |
-| `vera_add_interpretation(text, author, lang)` | standalone codebase-understanding snapshot, not tied to a turn |
-| `vera_get_interpretation(n)` | most recent interpretation snapshots, for comparing how understanding has shifted |
-| `vera_get_event_log(turn_id, type, k)` | raw event_log rows |
-| `vera_search(query, k)` | text search across events, facts, constraints, summaries |
-| `vera_check_consistency(current_action, current_proposal)` | check a proposal against every active constraint |
-| `vera_save_session(...)` | lower-level raw capture (kept for simple/legacy use — prefer `vera_record` for anything triggered by "Vera") |
-| `vera_list_facts` / `vera_add_constraint` / `vera_get_constraints` / `vera_list_contradictions` / `vera_get_session` / `vera_sync` / `vera_stats` | see docstrings in [vera/mcp_tools.py](../vera/mcp_tools.py) |
+| `vera_session_start(lang)` | **call this first, every session** — the latest digest (if any) plus recent numbered entries, plus the agent protocol |
+| `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang, model_timestamp)` | **call this when the user says "Vera"** — the structured, append-only, numbered capture; a repeat within the same connection is auto-suppressed |
+| `vera_lookup(n)` | fetch one entry by its citation number |
+| `vera_search(query, k)` | text search over entries and digests, results carry citation numbers |
+| `vera_compress(text, through_n, author, lang)` | store an AI-authored digest citing specific entry numbers |
+| `vera_pause(by)` / `vera_resume(by)` | stop/restart `vera_record` saving content |
+| `vera_stats()` | entries, authors, size vs. compression threshold, pause state, last event/control decision |
+| `vera_sync(remote_path)` | merge another store into this one |
 
 CLI equivalents exist for all of these — `vera <cmd>` (e.g. `vera start`,
 `vera record --request ... --change ...`); see the README's Commands
@@ -93,30 +109,27 @@ section or `vera --help`.
 
 en, ja, zh, es, fr, de, ko, pt, ru, it, ar, hi — defined in
 [vera/i18n.py](../vera/i18n.py). Structural field labels (REQUEST /
-CHANGE / REASON / RESULT / STATE, and the PROJECT CONTEXT labels) stay as
+CHANGE / REASON / RESULT / STATE, and the memory-block labels) stay as
 short, fixed English tokens across every language so they're a reliable
 anchor for an agent regardless of prose language; only the explanatory
 text and protocol rules are localized. `resolve_lang()` accepts a
-language's own code, English name, or native name ("de", "German",
-"Deutsch", "ドイツ語" all resolve to `de`) and falls back to English on
-anything unrecognized rather than erroring.
+language's own code, English name, native name, or a whole phrase
+containing one ("de", "German", "Deutsch", "ドイツ語", "英語で開いて") and
+falls back to English on anything unrecognized rather than erroring.
 
 ## Current limits
 
-- **Deterministic, not an LLM call.** Extraction and contradiction
-  checking are regex/keyword-based on purpose — reproducible, auditable,
-  works offline. An optional LLM summarizer layered on top of the same
-  event store is a natural v2, not a redesign of this one.
 - **Explicit recording only (v0.1).** Nothing hooks into git commits,
   tool execution, or session-end yet — recording happens when an agent
   calls `vera_record`/`vera_session_start`, following the protocol text.
   This is deliberate: what gets remembered should be legible and trusted
   from day one.
-- **`vera_session_start` shows a bounded recent window**, not full
-  history — `vera_search` / `vera_get_event_log` reach further back on
-  demand.
-- **Contradiction detection is keyword-scoped**, not a general judge. It
-  catches the "stdlib-only vs. add a dependency" class of drift well; a
-  genuinely open-ended check needs either more keyword families in
-  `check_consistency()` ([vera/store.py](../vera/store.py)) or an LLM
-  judge layered on top later.
+- **`vera_session_start` shows a bounded window**, not full history —
+  `vera_search` / `vera_lookup` reach further back on demand.
+- **The token estimate is a rough proxy** (`chars / 4`), not a real
+  tokenizer count for any specific model — good enough to decide "this is
+  clearly getting large," not precise.
+- **Dedup and compression are both per-store, not cross-store** — syncing
+  two stores does not re-run dedup against each other's history, and a
+  digest written in one store doesn't automatically apply to another
+  until synced.

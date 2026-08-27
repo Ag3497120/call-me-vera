@@ -1,24 +1,22 @@
-"""vera — the call-me-vera CLI: shared, append-only project memory for AI
-coding agents.
+"""vera — the call-me-vera CLI: shared, append-only, citable memory for
+AI coding agents.
+
+Deliberately small: `vera guide` explains everything else conversationally,
+so this reference only needs the bare list.
 
 Subcommands:
-  vera init [dir]                create the store in a project directory
-  vera start [--lang xx]         call BEFORE work: project state + protocol
-  vera record --request "..." [--change ...] [--reason ...] ...
-                                  the structured "Vera" capture (REQUEST/
-                                  CHANGE/REASON/RESULT/STATE)
-  vera guide [--lang xx]         full onboarding explanation, any language
-  vera save <prompt>             lower-level raw capture (author=local)
-  vera summarize <sid>           generate summary for a session
-  vera search <query>            search across all records
-  vera check --action <a>        consistency check against constraints
-  vera facts                     list recorded facts
-  vera constraints                list active constraints
-  vera contradictions            list detected contradictions
-  vera interpretation            latest codebase-interpretation snapshots
-  vera event-log                 raw append-only event_log rows
-  vera mcp                       start the Vera MCP server
-  vera sync                      sync two independently-grown stores
+  vera init [dir]                   create the store in a project directory
+  vera guide [--lang xx]            full onboarding explanation, any language
+  vera start [--lang xx]            call BEFORE work: memory + agent protocol
+  vera record --request "..." ...   the structured "Vera" capture
+  vera lookup <n>                   fetch one entry by its citation number
+  vera search <query>               text search, results carry citation numbers
+  vera compress --text "..." [--through <n>]
+                                     store an AI-authored digest citing numbers
+  vera pause / vera resume          stop/restart recording for a burst of activity
+  vera stats                        entries, size vs. compression threshold, state
+  vera sync --remote <path>         merge two independently-grown stores
+  vera mcp                          start the MCP server
 
 Usage patterns:
   # From Claude (MCP tool call):
@@ -34,17 +32,15 @@ Usage patterns:
   Author tagging:
     "claude" = recorded from within Claude / MCP
     "local"  = recorded from local CLI (terminal)
-    "vera"   = a standalone interpretation snapshot, not tied to a turn
+    "vera"   = reserved for future non-agent-authored entries
     All authors write to the same SQLite store; sync merges deterministically.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Optional
-
 
 DEFAULT_STORE = ".vera_store.db"
 
@@ -60,7 +56,7 @@ def _print(obj: Any) -> None:
     print(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
-def cmd_session_init(args) -> int:
+def cmd_init(args) -> int:
     """Initialize a Vera store in the current project."""
     from .store import init_store
 
@@ -71,34 +67,18 @@ def cmd_session_init(args) -> int:
     return 0
 
 
-def cmd_session_save(args) -> int:
-    """Save a session event from the local side."""
-    from .store import VeraStore
+def cmd_guide(args) -> int:
+    """Print the full Vera onboarding explanation in the requested language."""
+    from .i18n import render_guide
 
-    store = VeraStore(_store_path(args))
-    try:
-        sid = store.save_session(
-            author=args.author or "local",
-            user_prompt=args.prompt,
-            tool_calls=json.loads(args.tool_calls) if args.tool_calls else [],
-            tool_results=json.loads(args.tool_results) if args.tool_results else [],
-            git_diff=args.diff or "",
-            actions=json.loads(args.actions) if args.actions else [],
-            observations=json.loads(args.observations) if args.observations else [],
-            working_directory=str(Path.cwd()),
-        )
-        # Auto-generate summary
-        store.summarize(sid)
-        _print({"session_id": sid, "author": args.author or "local", "saved": True})
-    finally:
-        store.close()
+    print(render_guide(getattr(args, "lang", "en")))
     return 0
 
 
-def cmd_session_start(args) -> int:
-    """Call BEFORE doing any work in a new session: prints the project's
-    current state (interpretation/constraints/contradictions/recent
-    decisions & changes/unresolved) plus the agent behavior protocol."""
+def cmd_start(args) -> int:
+    """Call BEFORE doing any work in a new session: prints the latest
+    compression digest (if any) plus everything since it, or the most
+    recent entries if there's no digest yet, plus the agent protocol."""
     from .i18n import render_project_state
     from .store import VeraStore
 
@@ -111,17 +91,9 @@ def cmd_session_start(args) -> int:
     return 0
 
 
-def cmd_session_guide(args) -> int:
-    """Print the full Vera onboarding explanation in the requested language."""
-    from .i18n import render_guide
-
-    print(render_guide(getattr(args, "lang", "en")))
-    return 0
-
-
-def cmd_session_record(args) -> int:
+def cmd_record(args) -> int:
     """The structured "Vera" capture: REQUEST/CHANGE/REASON/RESULT/STATE,
-    each becoming its own permanent, append-only event."""
+    each becoming its own permanent, numbered, append-only entry."""
     from .i18n import resolve_lang
     from .store import VeraStore
 
@@ -145,9 +117,52 @@ def cmd_session_record(args) -> int:
     return 0
 
 
+def cmd_lookup(args) -> int:
+    """Fetch one entry by its citation number."""
+    from .store import VeraStore
+
+    store = VeraStore(_store_path(args))
+    try:
+        entry = store.lookup(args.n)
+        if entry is None:
+            print(f"no entry #{args.n}")
+            return 1
+        _print(entry)
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_search(args) -> int:
+    """Search across memory entries and compression digests."""
+    from .store import VeraStore
+
+    store = VeraStore(_store_path(args))
+    try:
+        _print(store.search(args.query, k=args.k or 10))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_compress(args) -> int:
+    """Store an AI-authored compressed digest citing specific entry numbers."""
+    from .i18n import resolve_lang
+    from .store import VeraStore
+
+    store = VeraStore(_store_path(args))
+    try:
+        _print(store.add_digest(
+            args.text, through_n=args.through or 0,
+            author=args.author or "claude", lang=resolve_lang(args.lang),
+        ))
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_pause(args) -> int:
-    """Stop `record` from saving content until `resume` — use before a
-    burst of activity you don't want recorded turn-by-turn."""
+    """Stop `record` from saving content until `resume`."""
     from .store import VeraStore
 
     store = VeraStore(_store_path(args))
@@ -170,173 +185,35 @@ def cmd_resume(args) -> int:
     return 0
 
 
-def cmd_status(args) -> int:
-    """Live session status: paused or not, last event, last control
-    decision (duplicate suppressed / paused skip), and running counts."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        _print(store.status())
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_interpretation(args) -> int:
-    """List the most recent codebase-interpretation snapshots."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        _print(store.get_latest_interpretation(n=args.n or 2))
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_add_interpretation(args) -> int:
-    """Record a standalone codebase-interpretation snapshot."""
-    from .i18n import resolve_lang
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        eid = store.add_interpretation(
-            args.text, author=args.author or "vera", lang=resolve_lang(args.lang)
-        )
-        _print({"event_id": eid})
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_event_log(args) -> int:
-    """List raw append-only event_log rows."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        _print(store.get_event_log(turn_id=args.turn or "", type_=args.type or "", k=args.k or 50))
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_session_summarize(args) -> int:
-    """Generate a summary for a session."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        s = store.summarize(args.session_id)
-        if not s:
-            print(f"session not found: {args.session_id}", file=sys.stderr)
-            return 1
-        _print({
-            "session_id": s.session_id,
-            "facts": s.facts,
-            "decisions": s.decisions,
-            "constraints": s.constraints,
-            "todos": s.todos,
-            "unresolved": s.unresolved,
-        })
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_search(args) -> int:
-    """Search across Vera records."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        results = store.search(args.query, k=args.k or 10)
-        _print(results)
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_check(args) -> int:
-    """Check consistency of current action against stored constraints."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        result = store.check_consistency(
-            current_action=args.action or "",
-            current_proposal=args.proposal or "",
-        )
-        _print(result)
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_facts(args) -> int:
-    """List recorded facts."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        result = store.list_facts(category=args.category or "")
-        _print(result)
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_constraints(args) -> int:
-    """List active constraints."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        result = store.get_constraints()
-        _print(result)
-    finally:
-        store.close()
-    return 0
-
-
-def cmd_contradictions(args) -> int:
-    """List detected contradictions."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
-    try:
-        result = store.list_contradictions(resolved_only=args.resolved or False)
-        _print(result)
-    finally:
-        store.close()
-    return 0
-
-
 def cmd_stats(args) -> int:
-    """Vera store statistics."""
+    """Entries, authors, size vs. compression threshold, pause state, last event."""
     from .store import VeraStore
 
     store = VeraStore(_store_path(args))
     try:
-        result = store.report()
-        _print(result)
+        _print(store.stats())
     finally:
         store.close()
     return 0
 
 
-def cmd_add_constraint(args) -> int:
-    """Add a constraint manually."""
+def cmd_sync(args) -> int:
+    """Sync two Vera stores (e.g. Claude's machine and local, reconciled after the fact)."""
     from .store import VeraStore
 
-    store = VeraStore(_store_path(args))
+    local_path = Path(getattr(args, "local", ".") or ".") / DEFAULT_STORE
+    remote_str = getattr(args, "remote", "") or ""
+    if not remote_str:
+        print("usage: vera sync --remote <path>")
+        return 1
+    remote_path = Path(remote_str) / DEFAULT_STORE
+
+    local = VeraStore(local_path)
     try:
-        cid = store.add_constraint(args.text, source_session=getattr(args, "session", ""))
-        _print({"constraint_id": cid, "text": args.text})
+        merged = local.sync(remote_path)
+        _print({"synced": True, "merged": merged})
     finally:
-        store.close()
+        local.close()
     return 0
 
 
@@ -347,33 +224,10 @@ def cmd_mcp(args) -> int:
     return vera_serve(str(_store_path(args)))
 
 
-def cmd_sync(args) -> int:
-    """Sync two Vera stores (local ↔ Claude)."""
-    from .store import VeraStore
-
-    local_path = Path(getattr(args, "local", ".") or ".") / DEFAULT_STORE
-    remote_str = getattr(args, "remote", "") or ""
-    if not remote_str:
-        # No remote specified — nothing to sync
-        print("usage: vera sync --remote <path>")
-        return 1
-    remote_path = Path(remote_str) / DEFAULT_STORE
-
-    local = VeraStore(local_path)
-    remote = VeraStore(remote_path)
-    try:
-        merged = local.sync(remote.db_path)
-        _print({"synced": True, "merged": merged})
-    finally:
-        local.close()
-        remote.close()
-    return 0
-
-
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="vera",
-        description="Vera — shared, append-only project memory for AI coding agents.",
+        description="Vera — shared, append-only, citable memory for AI coding agents.",
     )
     # --store is accepted both before AND after the sub-command (argparse
     # only honors a parent-parser flag when it precedes the sub-command
@@ -387,53 +241,53 @@ def main(argv: Optional[list] = None) -> int:
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    # init
-    p = sub.add_parser("init", help="create Vera store in a project directory", parents=[store_parent])
+    p = sub.add_parser("init", help="create the store in a project directory", parents=[store_parent])
     p.add_argument("dir", nargs="?", default=".")
-    p.set_defaults(fn=cmd_session_init)
+    p.set_defaults(fn=cmd_init)
 
-    # save
-    p = sub.add_parser("save", help="record a session event (from local side)", parents=[store_parent])
-    p.add_argument("prompt", help="user prompt / description")
-    p.add_argument("--author", default="local", choices=["claude", "local"])
-    p.add_argument("--tool-calls", default=None, help="JSON array of tool call strings")
-    p.add_argument("--tool-results", default=None, help="JSON array of tool result strings")
-    p.add_argument("--diff", default="", help="git diff output")
-    p.add_argument("--actions", default=None, help="JSON array of action descriptions")
-    p.add_argument("--observations", default=None, help="JSON array of observations")
-    p.set_defaults(fn=cmd_session_save)
-
-    # start
-    p = sub.add_parser("start", help="call BEFORE work: project state + agent protocol", parents=[store_parent])
-    p.add_argument("--lang", default="en", help="output language (code or name, e.g. de / German / Deutsch)")
-    p.set_defaults(fn=cmd_session_start)
-
-    # guide
     p = sub.add_parser("guide", help="full onboarding explanation, any language", parents=[store_parent])
     p.add_argument("--lang", default="en", help="output language (code or name, e.g. de / German / Deutsch)")
-    p.set_defaults(fn=cmd_session_guide)
+    p.set_defaults(fn=cmd_guide)
 
-    # record
+    p = sub.add_parser("start", help="call BEFORE work: memory + agent protocol", parents=[store_parent])
+    p.add_argument("--lang", default="en", help="output language (code or name, e.g. de / German / Deutsch)")
+    p.set_defaults(fn=cmd_start)
+
     p = sub.add_parser(
         "record",
         help='the structured "Vera" capture: REQUEST/CHANGE/REASON/RESULT/STATE',
         parents=[store_parent],
     )
     p.add_argument("--request", required=True, help="what was asked (REQUEST)")
-    p.add_argument("--author", default="local", choices=["claude", "local"])
+    p.add_argument("--author", default="local", choices=["claude", "local", "vera"])
     p.add_argument("--change", default="", help="what you did (CHANGE)")
     p.add_argument("--reason", default="", help="why you structured it that way (REASON)")
     p.add_argument("--files", default=None, help="JSON array of file paths touched")
     p.add_argument("--result", default="", help="what happened (RESULT)")
-    p.add_argument("--interpretation", default="", help="current understanding of the codebase (STATE)")
+    p.add_argument("--interpretation", default="", help="current understanding (STATE)")
     p.add_argument("--unresolved", default="", help="anything left open")
     p.add_argument("--lang", default="en", help="language this turn is recorded in")
     p.add_argument("--model-timestamp", dest="model_timestamp", default="",
                     help="ISO 8601 timestamp from the calling agent's own clock, "
                          "if it has one — sharpens duplicate detection; optional")
-    p.set_defaults(fn=cmd_session_record)
+    p.set_defaults(fn=cmd_record)
 
-    # pause / resume / status
+    p = sub.add_parser("lookup", help="fetch one entry by its citation number", parents=[store_parent])
+    p.add_argument("n", type=int)
+    p.set_defaults(fn=cmd_lookup)
+
+    p = sub.add_parser("search", help="text search, results carry citation numbers", parents=[store_parent])
+    p.add_argument("query")
+    p.add_argument("-k", type=int, default=10)
+    p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser("compress", help="store an AI-authored digest citing entry numbers", parents=[store_parent])
+    p.add_argument("--text", required=True, help="the digest text, citing entry numbers (e.g. \"per #3, #7: ...\")")
+    p.add_argument("--through", type=int, default=0, help="covers entries up to this number (0 = everything so far)")
+    p.add_argument("--author", default="claude", choices=["claude", "local", "vera"])
+    p.add_argument("--lang", default="en")
+    p.set_defaults(fn=cmd_compress)
+
     p = sub.add_parser("pause", help="stop `record` from saving until `resume`", parents=[store_parent])
     p.add_argument("--by", default="local", help="who paused it (recorded, not enforced)")
     p.set_defaults(fn=cmd_pause)
@@ -442,78 +296,16 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--by", default="local")
     p.set_defaults(fn=cmd_resume)
 
-    p = sub.add_parser("status", help="live session status: paused/last event/suppressed counts", parents=[store_parent])
-    p.set_defaults(fn=cmd_status)
-
-    # interpretation
-    p = sub.add_parser("interpretation", help="latest codebase-interpretation snapshots", parents=[store_parent])
-    p.add_argument("-n", type=int, default=2, help="how many snapshots, newest first")
-    p.set_defaults(fn=cmd_interpretation)
-
-    # add-interpretation
-    p = sub.add_parser("add-interpretation", help="record a standalone interpretation snapshot", parents=[store_parent])
-    p.add_argument("text")
-    p.add_argument("--author", default="vera", choices=["claude", "local", "vera"])
-    p.add_argument("--lang", default="en")
-    p.set_defaults(fn=cmd_add_interpretation)
-
-    # event-log
-    p = sub.add_parser("event-log", help="raw append-only event_log rows", parents=[store_parent])
-    p.add_argument("--turn", default="", help="filter by turn_id")
-    p.add_argument("--type", default="", help="filter by type (request|change|decision|result|observation|assumption|unresolved|interpretation)")
-    p.add_argument("-k", type=int, default=50)
-    p.set_defaults(fn=cmd_event_log)
-
-    # summarize
-    p = sub.add_parser("summarize", help="generate summary for a session", parents=[store_parent])
-    p.add_argument("session_id")
-    p.set_defaults(fn=cmd_session_summarize)
-
-    # search
-    p = sub.add_parser("search", help="search across all Vera records", parents=[store_parent])
-    p.add_argument("query")
-    p.add_argument("-k", type=int, default=10)
-    p.set_defaults(fn=cmd_search)
-
-    # check
-    p = sub.add_parser("check", help="check consistency against stored constraints", parents=[store_parent])
-    p.add_argument("--action", default="", help="current action being taken")
-    p.add_argument("--proposal", default="", help="current proposal under consideration")
-    p.set_defaults(fn=cmd_check)
-
-    # facts
-    p = sub.add_parser("facts", help="list recorded facts", parents=[store_parent])
-    p.add_argument("--category", default="")
-    p.set_defaults(fn=cmd_facts)
-
-    # constraints
-    p = sub.add_parser("constraints", help="list active constraints", parents=[store_parent])
-    p.set_defaults(fn=cmd_constraints)
-
-    # add-constraint
-    p = sub.add_parser("add-constraint", help="add a constraint manually", parents=[store_parent])
-    p.add_argument("text")
-    p.add_argument("--session", default="", help="source session ID")
-    p.set_defaults(fn=cmd_add_constraint)
-
-    # contradictions
-    p = sub.add_parser("contradictions", help="list detected contradictions", parents=[store_parent])
-    p.add_argument("--resolved", action="store_true")
-    p.set_defaults(fn=cmd_contradictions)
-
-    # stats
-    p = sub.add_parser("stats", help="Vera store statistics", parents=[store_parent])
+    p = sub.add_parser("stats", help="entries, size vs. threshold, pause state, last event", parents=[store_parent])
     p.set_defaults(fn=cmd_stats)
 
-    # mcp
-    p = sub.add_parser("mcp", help="start the Vera MCP server", parents=[store_parent])
-    p.set_defaults(fn=cmd_mcp)
-
-    # sync
     p = sub.add_parser("sync", help="sync two Vera stores (local ↔ Claude)", parents=[store_parent])
     p.add_argument("--local", default=".")
     p.add_argument("--remote", default="")
     p.set_defaults(fn=cmd_sync)
+
+    p = sub.add_parser("mcp", help="start the Vera MCP server", parents=[store_parent])
+    p.set_defaults(fn=cmd_mcp)
 
     args = ap.parse_args(argv)
     return args.fn(args)
