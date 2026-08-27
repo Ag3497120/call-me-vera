@@ -5,226 +5,386 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>call me vera — shared memory for AI coding agents</title>
 <meta name="description" content="Shared, append-only, citable memory for AI coding agents. Claude, local models, and Codex read and write one memory log to continue the same project across sessions.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0b0d10;
-    --bg-raised: #12151a;
-    --border: #232830;
-    --text: #e6e8eb;
-    --text-dim: #9aa3ad;
-    --accent: #7ee0c3;
-    --accent-dim: #3f7d6c;
-    --mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    --cream: #fff6e9;
+    --ink: #1a1523;
+    --pink: #ff5fa2;
+    --pink-deep: #e8397f;
+    --yellow: #ffd23f;
+    --blue: #4dd6ff;
+    --blue-deep: #1aa8d6;
+    --green: #5fe0a5;
+    --purple: #b586ff;
+    --border-w: 3px;
+    --heading: "Fredoka", var(--sans);
+    --mono: "Space Mono", ui-monospace, Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
-    background: var(--bg);
-    color: var(--text);
+    /* tiled "vera" wallpaper baked into the real background (not a
+       fixed-position pseudo-element — that combination reliably broke
+       painting after scroll on a page this tall) */
+    background-color: var(--cream);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='140' viewBox='0 0 260 140'%3E%3Ctext x='10' y='60' font-family='Fredoka, sans-serif' font-size='34' font-weight='700' fill='%23e9dcc4' transform='rotate(-10 10 60)'%3Evera%3C/text%3E%3Ctext x='140' y='120' font-family='Fredoka, sans-serif' font-size='34' font-weight='700' fill='%23e9dcc4' transform='rotate(-10 140 120)'%3Evera%3C/text%3E%3C/svg%3E");
+    background-size: 260px 140px;
+    color: var(--ink);
     font-family: var(--sans);
     line-height: 1.6;
+    overflow-x: hidden;
   }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 0 1.5rem; }
 
-  header.hero { padding: 5rem 0 3rem; text-align: center; }
-  .logo {
-    font-family: var(--mono);
+  a { color: var(--pink-deep); }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 1.5rem; position: relative; }
+
+  /* marquee */
+  .marquee {
+    background: var(--ink);
+    color: var(--yellow);
+    overflow: hidden;
+    white-space: nowrap;
+    border-bottom: var(--border-w) solid var(--ink);
+    position: relative;
+    z-index: 2;
+  }
+  .marquee div {
+    display: inline-block;
+    padding: 0.5rem 0;
+    font-family: var(--heading);
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: 0.08em;
+    animation: scroll 18s linear infinite;
+  }
+  .marquee span { margin: 0 1.2rem; }
+  .marquee span:nth-child(4n+2) { color: var(--pink); }
+  .marquee span:nth-child(4n+3) { color: var(--blue); }
+  .marquee span:nth-child(4n)   { color: var(--green); }
+  @keyframes scroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+
+  header.hero { padding: 4.5rem 0 3rem; text-align: center; position: relative; z-index: 1; }
+  .stamp {
+    display: inline-block;
+    font-family: var(--heading);
+    font-weight: 600;
     font-size: 0.85rem;
-    letter-spacing: 0.15em;
-    color: var(--accent);
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    margin-bottom: 1.25rem;
+    background: var(--yellow);
+    border: var(--border-w) solid var(--ink);
+    border-radius: 999px;
+    padding: 0.35rem 1rem;
+    transform: rotate(-3deg);
+    box-shadow: 4px 4px 0 var(--ink);
+    margin-bottom: 1.75rem;
   }
   h1 {
-    font-size: clamp(2rem, 5vw, 2.75rem);
-    font-weight: 600;
-    margin: 0 0 1rem;
-    letter-spacing: -0.02em;
+    font-family: var(--heading);
+    font-size: clamp(2.4rem, 7vw, 3.6rem);
+    font-weight: 700;
+    margin: 0 0 1.25rem;
+    letter-spacing: -0.01em;
+    line-height: 1.08;
   }
+  h1 .accent { color: var(--pink-deep); }
+  h1 .accent2 { color: var(--blue-deep); }
   .tagline {
     font-size: 1.15rem;
-    color: var(--text-dim);
+    color: var(--ink);
+    opacity: 0.75;
     max-width: 560px;
-    margin: 0 auto 2rem;
+    margin: 0 auto 2.25rem;
   }
-  .cta-row {
-    display: flex;
-    gap: 0.75rem;
-    justify-content: center;
-    flex-wrap: wrap;
-  }
+  .cta-row { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
   .btn {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    padding: 0.6rem 1.2rem;
-    border-radius: 8px;
-    font-family: var(--mono);
-    font-size: 0.9rem;
-    font-weight: 500;
-    border: 1px solid var(--border);
-  }
-  .btn.primary { background: var(--accent); color: #0b0d10; border-color: var(--accent); }
-  .btn.primary:hover { text-decoration: none; opacity: 0.9; }
-  .btn.secondary { color: var(--text); }
-  .btn.secondary:hover { text-decoration: none; border-color: var(--accent-dim); }
-
-  .demo { margin: 2.5rem auto 0; max-width: 760px; }
-  .demo img {
-    width: 100%;
-    display: block;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-  }
-
-  section { padding: 3rem 0; border-top: 1px solid var(--border); }
-  h2 {
-    font-size: 1.4rem;
+    padding: 0.75rem 1.5rem;
+    border-radius: 12px;
+    font-family: var(--heading);
     font-weight: 600;
-    margin: 0 0 1.5rem;
-    letter-spacing: -0.01em;
+    font-size: 1rem;
+    border: var(--border-w) solid var(--ink);
+    color: var(--ink);
+    text-decoration: none;
+    box-shadow: 5px 5px 0 var(--ink);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
   }
+  .btn:hover { transform: translate(2px, 2px); box-shadow: 3px 3px 0 var(--ink); text-decoration: none; }
+  .btn.primary { background: var(--pink); }
+  .btn.secondary { background: var(--blue); }
+
+  .demo { margin: 3rem auto 0; max-width: 780px; position: relative; z-index: 1; }
+  .demo-frame {
+    border: var(--border-w) solid var(--ink);
+    border-radius: 16px;
+    box-shadow: 8px 8px 0 var(--ink);
+    overflow: hidden;
+    transform: rotate(-1deg);
+    background: var(--ink);
+  }
+  .demo-frame .bar { display: flex; gap: 0.4rem; padding: 0.6rem 0.8rem; background: var(--ink); }
+  .demo-frame .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .demo-frame .dot:nth-child(1) { background: var(--pink); }
+  .demo-frame .dot:nth-child(2) { background: var(--yellow); }
+  .demo-frame .dot:nth-child(3) { background: var(--green); }
+  .demo-frame img { width: 100%; display: block; }
+
+  section { padding: 3.5rem 0; position: relative; z-index: 1; }
+  h2 {
+    font-family: var(--heading);
+    font-size: 1.7rem;
+    font-weight: 700;
+    margin: 0 0 1.5rem;
+    display: inline-block;
+    background: var(--yellow);
+    padding: 0.15rem 0.7rem;
+    border: var(--border-w) solid var(--ink);
+    border-radius: 8px;
+    transform: rotate(-1deg);
+    box-shadow: 4px 4px 0 var(--ink);
+  }
+
   .diagram {
     font-family: var(--mono);
     font-size: 0.85rem;
-    color: var(--text-dim);
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    color: var(--ink);
+    background: #fff;
+    border: var(--border-w) solid var(--ink);
+    border-radius: 12px;
     padding: 1.25rem 1.5rem;
     overflow-x: auto;
     white-space: pre;
     margin: 0 0 2rem;
+    box-shadow: 5px 5px 0 var(--ink);
   }
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-    gap: 1.25rem;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1.4rem;
   }
   .card {
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1.25rem 1.4rem;
+    background: #fff;
+    border: var(--border-w) solid var(--ink);
+    border-radius: 14px;
+    padding: 1.4rem 1.5rem;
+    box-shadow: 6px 6px 0 var(--ink);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
   }
+  .card:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--ink); }
+  .card:nth-child(4n+1) { border-color: var(--pink-deep); }
+  .card:nth-child(4n+2) { border-color: var(--blue-deep); }
+  .card:nth-child(4n+3) { border-color: var(--ink); }
+  .card:nth-child(4n+4) { border-color: #33a476; }
   .card h3 {
-    font-size: 0.95rem;
+    font-family: var(--heading);
+    font-size: 1.05rem;
     margin: 0 0 0.5rem;
-    color: var(--accent);
-    font-family: var(--mono);
-    font-weight: 500;
+    font-weight: 600;
   }
-  .card p { margin: 0; color: var(--text-dim); font-size: 0.92rem; }
+  .card p { margin: 0; color: var(--ink); opacity: 0.75; font-size: 0.92rem; }
 
   pre {
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
+    background: var(--ink);
+    color: var(--green);
+    border: var(--border-w) solid var(--ink);
+    border-radius: 12px;
+    padding: 1.1rem 1.4rem;
     overflow-x: auto;
     font-family: var(--mono);
     font-size: 0.85rem;
-    line-height: 1.6;
-    color: var(--text);
+    line-height: 1.7;
+    box-shadow: 5px 5px 0 var(--purple);
   }
   code { font-family: var(--mono); }
   p code, li code {
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0.1rem 0.35rem;
+    background: var(--yellow);
+    border: 2px solid var(--ink);
+    border-radius: 5px;
+    padding: 0.1rem 0.4rem;
     font-size: 0.88em;
   }
 
-  .cmd-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.85rem; }
-  .cmd-table td { padding: 0.4rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
-  .cmd-table td:first-child { color: var(--accent); white-space: nowrap; padding-right: 1.5rem; }
-  .cmd-table td:last-child { color: var(--text-dim); font-family: var(--sans); }
+  .cmd-table { width: 100%; border-collapse: separate; border-spacing: 0 0.5rem; font-family: var(--mono); font-size: 0.85rem; }
+  .cmd-table td { padding: 0.6rem 0.9rem; background: #fff; border-top: 3px solid var(--ink); border-bottom: 3px solid var(--ink); }
+  .cmd-table td:first-child { color: var(--pink-deep); font-weight: 700; white-space: nowrap; border-left: 3px solid var(--ink); border-radius: 8px 0 0 8px; }
+  .cmd-table td:last-child { color: var(--ink); opacity: 0.75; font-family: var(--sans); border-right: 3px solid var(--ink); border-radius: 0 8px 8px 0; }
 
   footer {
-    padding: 3rem 0 4rem;
+    padding: 2rem 0;
     text-align: center;
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    border-top: 1px solid var(--border);
+    font-family: var(--heading);
+    font-weight: 600;
+    font-size: 0.9rem;
+    position: relative;
+    z-index: 1;
   }
-  footer a { color: var(--text-dim); }
-  footer a:hover { color: var(--accent); }
+  footer a { color: var(--ink); }
+
+  /* intro: everyone shouts "vera" through megaphones, then it clears */
+  .splash {
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--pink);
+    overflow: hidden;
+    animation: splash-out 0.5s ease-in 2.1s forwards;
+  }
+  .splash-word {
+    position: relative;
+    font-family: var(--heading);
+    font-weight: 700;
+    font-size: clamp(3rem, 16vw, 7.5rem);
+    color: var(--ink);
+    text-shadow: 5px 5px 0 var(--yellow);
+    letter-spacing: 0.02em;
+    opacity: 0;
+    transform: scale(0.2) rotate(-10deg);
+    animation: shout-in 0.45s cubic-bezier(.34,1.56,.64,1) 0.55s forwards;
+  }
+  .shout {
+    position: absolute;
+    font-family: var(--heading);
+    font-weight: 700;
+    font-size: clamp(1rem, 3vw, 1.6rem);
+    color: var(--ink);
+    background: #fff;
+    border: 3px solid var(--ink);
+    border-radius: 999px;
+    padding: 0.3rem 0.9rem;
+    white-space: nowrap;
+    opacity: 0;
+    animation: shout-fly 0.5s cubic-bezier(.3,1.5,.5,1) forwards;
+  }
+  .shout .mega { margin-right: 0.25rem; }
+  .shout.s1 { top: 14%; left: 12%;  --tx: -140px; --ty: -80px;  animation-delay: 0.05s; background: var(--yellow); }
+  .shout.s2 { top: 18%; right: 10%; --tx: 150px;  --ty: -90px;  animation-delay: 0.18s; background: var(--blue); }
+  .shout.s3 { bottom: 20%; left: 8%; --tx: -160px; --ty: 90px;  animation-delay: 0.3s;  background: var(--green); }
+  .shout.s4 { bottom: 16%; right: 9%; --tx: 150px;  --ty: 100px; animation-delay: 0.42s; background: var(--purple); }
+  .shout.s5 { top: 46%; left: 4%;   --tx: -190px; --ty: 0px;    animation-delay: 0.6s;  background: #fff; }
+  .shout.s6 { top: 44%; right: 3%;  --tx: 190px;   --ty: 0px;   animation-delay: 0.72s; background: #fff; }
+
+  @keyframes shout-in {
+    0%   { opacity: 0; transform: scale(0.2) rotate(-10deg); }
+    55%  { opacity: 1; transform: scale(1.18) rotate(3deg); }
+    80%  { transform: scale(0.94) rotate(-2deg); }
+    100% { opacity: 1; transform: scale(1) rotate(-1deg); }
+  }
+  @keyframes shout-fly {
+    from { opacity: 0; transform: translate(var(--tx), var(--ty)) scale(0.4) rotate(-6deg); }
+    70%  { opacity: 1; }
+    to   { opacity: 1; transform: translate(0, 0) scale(1) rotate(-3deg); }
+  }
+  @keyframes splash-out {
+    to { opacity: 0; visibility: hidden; pointer-events: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .splash { animation: splash-out 0.01s linear 0.01s forwards; }
+    .splash-word, .shout { animation: none; opacity: 1; transform: none; }
+  }
 </style>
 </head>
 <body>
 
+<div class="splash" aria-hidden="true">
+  <div class="shout s1"><span class="mega">📣</span>vera</div>
+  <div class="shout s2"><span class="mega">📣</span>vera</div>
+  <div class="shout s3"><span class="mega">📣</span>vera</div>
+  <div class="shout s4"><span class="mega">📣</span>vera</div>
+  <div class="shout s5"><span class="mega">📣</span>vera</div>
+  <div class="shout s6"><span class="mega">📣</span>vera</div>
+  <div class="splash-word">VERA!!</div>
+</div>
+
+<div class="marquee"><div>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+</div></div>
+
 <header class="hero">
   <div class="wrap">
-    <div class="logo">call me vera</div>
-    <h1>Shared, append-only, citable<br>memory for AI coding agents</h1>
+    <span class="stamp">call me vera</span>
+    <h1>memory that<br>outlives your <span class="accent">session</span>,<br>not just your <span class="accent2">context</span></h1>
     <p class="tagline">
-      Claude, local models, and Codex read and write one memory log instead
-      of sharing sessions — so a project's memory outlives any single
-      conversation. Vera doesn't interpret what it stores. It just gives
-      every entry a number.
+      Claude, local models, and Codex read and write one shared,
+      append-only memory log instead of sharing sessions. Vera doesn't
+      interpret what it stores — it just gives every entry a number.
     </p>
     <div class="cta-row">
-      <a class="btn primary" href="https://github.com/Ag3497120/call-me-vera">View on GitHub →</a>
-      <a class="btn secondary" href="#quickstart">Quick start</a>
+      <a class="btn primary" href="https://github.com/Ag3497120/call-me-vera">⭐ View on GitHub</a>
+      <a class="btn secondary" href="#quickstart">🚀 Quick start</a>
     </div>
   </div>
 </header>
 
 <div class="wrap">
   <div class="demo">
-    <img src="/assets/demo.gif" alt="Vera demo: recording and resuming memory across a Claude Desktop + Ollama session">
+    <div class="demo-frame">
+      <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <img src="/assets/demo.gif" alt="Vera demo: recording and resuming memory across a Claude Desktop + Ollama session">
+    </div>
   </div>
 </div>
 
 <div class="wrap">
 
 <section>
-  <h2>How it fits together</h2>
+  <h2>how it fits together</h2>
   <div class="diagram">Claude ──┐
 Local ────┼── same .vera_store.db (SQLite, WAL) ── numbered, append-only memory
 Codex ────┘        author: claude | local | vera</div>
   <div class="grid">
     <div class="card">
-      <h3>No interpretation</h3>
-      <p>No fact extraction, no contradiction detection. Deciding what an entry means is the reading agent's job, every time — not a fixed rule baked into Vera.</p>
+      <h3>🙈 no interpretation</h3>
+      <p>No fact extraction, no contradiction detection. Deciding what an entry means is the reading agent's job, every time — not a fixed rule baked into vera.</p>
     </div>
     <div class="card">
-      <h3>Citable by number</h3>
+      <h3>🔢 citable by number</h3>
       <p>Every REQUEST / CHANGE / REASON / RESULT / STATE becomes its own permanent, numbered row. Cite <code>#12</code>, fetch it exactly with <code>vera lookup</code>.</p>
     </div>
     <div class="card">
-      <h3>Append-only, for real</h3>
+      <h3>🔒 append-only, for real</h3>
       <p>SQLite triggers reject UPDATE/DELETE on the log — not a convention, a database-level guarantee.</p>
     </div>
     <div class="card">
-      <h3>Named, resumable memory</h3>
+      <h3>🏷️ named, resumable</h3>
       <p>Name a memory once; any other session or app reconnects to the exact same store by name, regardless of its own default path.</p>
     </div>
   </div>
 </section>
 
 <section id="quickstart">
-  <h2>Quick start</h2>
+  <h2>quick start</h2>
   <pre>pip install -e ".[mcp]"
 vera init .
 claude mcp add vera -- vera mcp --store ./.vera_store.db</pre>
-  <p>Connect Vera to your agent, then say:</p>
+  <p>Connect vera to your agent, then say:</p>
   <pre>Vera guide</pre>
-  <p>Vera explains itself directly to the agent — in whichever of 12
+  <p>vera explains itself directly to the agent — in whichever of 12
   languages you asked in — including the exact behavior protocol to
   follow and when to suggest compression.</p>
 </section>
 
 <section>
-  <h2>Commands</h2>
+  <h2>commands</h2>
   <table class="cmd-table">
     <tr><td>vera start</td><td>call before work — memory + agent protocol</td></tr>
-    <tr><td>vera record</td><td>the structured "Vera" capture, auto-dedups a retry</td></tr>
+    <tr><td>vera record</td><td>the structured "vera" capture, auto-dedups a retry</td></tr>
     <tr><td>vera lookup &lt;n&gt;</td><td>fetch one entry by its citation number</td></tr>
     <tr><td>vera search</td><td>text search, results carry citation numbers</td></tr>
     <tr><td>vera compress</td><td>store an AI-authored digest citing entry numbers</td></tr>
@@ -238,9 +398,16 @@ claude mcp add vera -- vera mcp --store ./.vera_store.db</pre>
 
 <footer>
   <div class="wrap">
-    MIT License · <a href="https://github.com/Ag3497120/call-me-vera">github.com/Ag3497120/call-me-vera</a>
+    MIT · <a href="https://github.com/Ag3497120/call-me-vera">github.com/Ag3497120/call-me-vera</a> · say it with me: <span style="color:var(--pink-deep)">vera</span>
   </div>
 </footer>
+
+<div class="marquee"><div>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+  <span>✦ vera</span><span>✦ vera</span><span>✦ vera</span><span>✦ vera</span>
+</div></div>
 
 </body>
 </html>
