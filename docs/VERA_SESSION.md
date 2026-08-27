@@ -87,11 +87,48 @@ digest plus only what's recorded after it, instead of the full history —
 but nothing is deleted; every cited number stays reachable with
 `vera_lookup`.
 
+### Named stores — resuming the same memory across sessions/apps
+
+Each MCP registration (or `--store` path) is its own file by default —
+two registrations that were never deliberately pointed at the same path
+have disjoint memories, even if both are called "vera". `claim_name()`
+([vera/store.py](../vera/store.py)) fixes this: a name always resolves to
+`~/.vera/stores/<name>.db` (`resolve_named_path()`), independent of
+whatever `--store` path any given connection started with. Any tool call
+that accepts a `name` parameter uses that fixed location instead of the
+connection's own default store.
+
+`claim_name(current_store, name)`:
+- If the name is free: creates a store at the fixed path and `sync()`s
+  everything from `current_store` into it (id-keyed, append-only-safe —
+  `current_store`'s own file is untouched).
+- If the name already belongs to a *different* store: refuses with
+  `{"error": ..., "hint": 'vera_session_start(name="...")'}` rather than
+  silently merging into a stranger's memory. Distinguished from a
+  legitimate re-claim by checking whether any of `current_store`'s own
+  `event_log` ids are already present at the target — only true if this
+  exact store was synced there before.
+- Re-claiming a name the current store already owns: idempotent
+  success, and also pushes any newly recorded entries up to the shared
+  copy (it's a real `sync()` every time, not a one-shot copy).
+
+`vera_session_start`/`vera start` on a completely fresh, unnamed, empty
+store returns a "NO MEMORY YET" prompt (in English only currently — not
+yet localized across the 12 guide languages) instructing the agent to ask
+the user for a name rather than a normal empty memory block.
+`vera_guide`/`vera guide` accepts the same `name` and, when given,
+appends a reminder of the exact reconnect call.
+
+The MCP server process caches one `VeraStore` per name for its own
+lifetime ([vera/mcp_tools.py](../vera/mcp_tools.py)'s `_resolve()`) —
+reopening a fresh instance per call would mint a new `session_id` every
+time (see Duplicate detection above) and silently break dedup for
+anything routed through a name.
+
 ## Tools (MCP)
 
 | Tool | What it does |
 |------|---------------|
-| `vera_guide(lang)` | full onboarding explanation, any supported language |
 | `vera_session_start(lang)` | **call this first, every session** — the latest digest (if any) plus recent numbered entries, plus the agent protocol |
 | `vera_record(request, author, change, reason, files, result, interpretation, unresolved, lang, model_timestamp)` | **call this when the user says "Vera"** — the structured, append-only, numbered capture; a repeat within the same connection is auto-suppressed |
 | `vera_lookup(n)` | fetch one entry by its citation number |
@@ -100,6 +137,13 @@ but nothing is deleted; every cited number stays reachable with
 | `vera_pause(by)` / `vera_resume(by)` | stop/restart `vera_record` saving content |
 | `vera_stats()` | entries, authors, size vs. compression threshold, pause state, last event/control decision |
 | `vera_sync(remote_path)` | merge another store into this one |
+| `vera_claim_name(name, source_name)` | name a memory so any session/app can resume it via `name=` on any other call |
+| `vera_list_named_stores()` | list every claimed memory name |
+
+Every tool above except `vera_guide`'s core text also accepts a `name`
+parameter — pass it to operate on the named memory at
+`~/.vera/stores/<name>.db` instead of this connection's own default
+store; see "Named stores" above.
 
 CLI equivalents exist for all of these — `vera <cmd>` (e.g. `vera start`,
 `vera record --request ... --change ...`); see the README's Commands
@@ -126,6 +170,13 @@ falls back to English on anything unrecognized rather than erroring.
   from day one.
 - **`vera_session_start` shows a bounded window**, not full history —
   `vera_search` / `vera_lookup` reach further back on demand.
+- **The "name this memory" prompt isn't localized yet** — it's returned
+  in English regardless of `lang`, unlike the rest of the guide/protocol
+  text. A small, tractable follow-up (a handful of short strings in
+  `_LABELS`), just not done yet.
+- **Naming is local-machine only.** `~/.vera/stores/` isn't itself synced
+  anywhere — resuming a named memory from a genuinely different machine
+  still needs `vera sync`, same as any other pair of stores.
 - **The token estimate is a rough proxy** (`chars / 4`), not a real
   tokenizer count for any specific model — good enough to decide "this is
   clearly getting large," not precise.

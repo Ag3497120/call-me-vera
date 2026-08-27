@@ -7,7 +7,7 @@ so this reference only needs the bare list.
 Subcommands:
   vera init [dir]                   create the store in a project directory
   vera guide [--lang xx]            full onboarding explanation, any language
-  vera start [--lang xx]            call BEFORE work: memory + agent protocol
+  vera start [--lang xx] [--name N] call BEFORE work: memory + agent protocol
   vera record --request "..." ...   the structured "Vera" capture
   vera lookup <n>                   fetch one entry by its citation number
   vera search <query>               text search, results carry citation numbers
@@ -16,7 +16,16 @@ Subcommands:
   vera pause / vera resume          stop/restart recording for a burst of activity
   vera stats                        entries, size vs. compression threshold, state
   vera sync --remote <path>         merge two independently-grown stores
+  vera claim-name <name>            name this memory so any session/app can resume it
+  vera names                        list every claimed memory name
   vera mcp                          start the MCP server
+
+Any command above also accepts --name <N> instead of --store <path> — this
+routes it to a NAMED memory (see `vera claim-name`) at its fixed, shared
+location (~/.vera/stores/<name>.db) rather than this invocation's own
+--store path. That's the actual mechanism behind "resume this memory from
+a different session/app": pass the same --name anywhere, get the same
+memory.
 
 Usage patterns:
   # From Claude (MCP tool call):
@@ -28,6 +37,10 @@ Usage patterns:
 
   # Sync between Claude's machine and a local machine that never shared a filesystem:
     vera sync --local . --remote ../other-machine-checkout
+
+  # Name a memory so it's reachable from anywhere by name:
+    vera claim-name project-vera
+    vera start --name project-vera        # from any other session/app
 
   Author tagging:
     "claude" = recorded from within Claude / MCP
@@ -52,6 +65,17 @@ def _store_path(args) -> Path:
     return p
 
 
+def _open_store(args):
+    """Resolve --name (a shared, named memory) or --store (a plain path)
+    to an open VeraStore — --name takes precedence when both are given."""
+    from .store import VeraStore, resolve_named_path
+
+    name = (getattr(args, "name", None) or "").strip()
+    if name:
+        return VeraStore(resolve_named_path(name))
+    return VeraStore(_store_path(args))
+
+
 def _print(obj: Any) -> None:
     print(json.dumps(obj, indent=2, ensure_ascii=False))
 
@@ -71,21 +95,41 @@ def cmd_guide(args) -> int:
     """Print the full Vera onboarding explanation in the requested language."""
     from .i18n import render_guide
 
-    print(render_guide(getattr(args, "lang", "en")))
+    text = render_guide(getattr(args, "lang", "en"))
+    name = (getattr(args, "name", None) or "").strip()
+    if name:
+        text += (
+            f'\n\nThis session\'s memory is named "{name}". To resume it from '
+            f'any other session or app: vera start --name {name} '
+            f'(MCP: vera_session_start(name="{name}")).'
+        )
+    print(text)
     return 0
 
 
 def cmd_start(args) -> int:
     """Call BEFORE doing any work in a new session: prints the latest
     compression digest (if any) plus everything since it, or the most
-    recent entries if there's no digest yet, plus the agent protocol."""
+    recent entries if there's no digest yet, plus the agent protocol.
+    If this is a brand-new, unnamed, empty memory, prints a prompt to
+    name it instead (see `vera claim-name`) so it can be resumed by name
+    from elsewhere."""
     from .i18n import render_project_state
-    from .store import VeraStore
 
-    store = VeraStore(_store_path(args))
+    name = (getattr(args, "name", None) or "").strip()
+    store = _open_store(args)
     try:
         state = store.get_project_state()
-        print(render_project_state(state, getattr(args, "lang", "en")))
+        lang = getattr(args, "lang", "en")
+        if not name and not state["name"] and state["size"]["uncompressed_entries"] == 0 and not state["digest"]:
+            print(
+                "NO MEMORY YET\n"
+                "This looks like a brand-new, unnamed memory. Consider naming it "
+                "so it can be resumed from any other session or app:\n"
+                "  vera claim-name <name>\n"
+                "  vera start --name <name>   # from anywhere, to resume it\n\n"
+            )
+        print(render_project_state(state, lang))
     finally:
         store.close()
     return 0
@@ -95,9 +139,8 @@ def cmd_record(args) -> int:
     """The structured "Vera" capture: REQUEST/CHANGE/REASON/RESULT/STATE,
     each becoming its own permanent, numbered, append-only entry."""
     from .i18n import resolve_lang
-    from .store import VeraStore
 
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         result = store.record_turn(
             author=args.author or "local",
@@ -119,9 +162,7 @@ def cmd_record(args) -> int:
 
 def cmd_lookup(args) -> int:
     """Fetch one entry by its citation number."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         entry = store.lookup(args.n)
         if entry is None:
@@ -135,9 +176,7 @@ def cmd_lookup(args) -> int:
 
 def cmd_search(args) -> int:
     """Search across memory entries and compression digests."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         _print(store.search(args.query, k=args.k or 10))
     finally:
@@ -148,9 +187,8 @@ def cmd_search(args) -> int:
 def cmd_compress(args) -> int:
     """Store an AI-authored compressed digest citing specific entry numbers."""
     from .i18n import resolve_lang
-    from .store import VeraStore
 
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         _print(store.add_digest(
             args.text, through_n=args.through or 0,
@@ -163,9 +201,7 @@ def cmd_compress(args) -> int:
 
 def cmd_pause(args) -> int:
     """Stop `record` from saving content until `resume`."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         _print(store.pause(by=getattr(args, "by", None) or "local"))
     finally:
@@ -175,9 +211,7 @@ def cmd_pause(args) -> int:
 
 def cmd_resume(args) -> int:
     """Undo `pause` — `record` saves normally again."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         _print(store.resume(by=getattr(args, "by", None) or "local"))
     finally:
@@ -187,9 +221,7 @@ def cmd_resume(args) -> int:
 
 def cmd_stats(args) -> int:
     """Entries, authors, size vs. compression threshold, pause state, last event."""
-    from .store import VeraStore
-
-    store = VeraStore(_store_path(args))
+    store = _open_store(args)
     try:
         _print(store.stats())
     finally:
@@ -217,6 +249,30 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def cmd_claim_name(args) -> int:
+    """Give a memory a name so it can be resumed from any other
+    session/app via `vera start --name <name>`, instead of needing a
+    filesystem path. Refuses if the name is already used by a genuinely
+    different memory; re-claiming a name this same memory already has is
+    a safe no-op."""
+    from .store import claim_name
+
+    store = _open_store(args)
+    try:
+        _print(claim_name(store, args.claim_target))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_names(args) -> int:
+    """List every memory name currently claimed."""
+    from .store import list_named_stores
+
+    _print(list_named_stores())
+    return 0
+
+
 def cmd_mcp(args) -> int:
     """Start the Vera MCP server."""
     from .mcp_tools import vera_serve
@@ -229,15 +285,17 @@ def main(argv: Optional[list] = None) -> int:
         prog="vera",
         description="Vera — shared, append-only, citable memory for AI coding agents.",
     )
-    # --store is accepted both before AND after the sub-command (argparse
-    # only honors a parent-parser flag when it precedes the sub-command
-    # name, and "vera mcp --store X" is the natural order people actually
-    # type) — so it's declared on a shared parent, included in every
-    # sub-parser via `parents=[...]`, *and* kept on the top-level parser
-    # for the "--store X <cmd>" order too.
+    # --store/--name are accepted both before AND after the sub-command
+    # (argparse only honors a parent-parser flag when it precedes the
+    # sub-command name, and "vera mcp --store X" is the natural order
+    # people actually type) — so they're declared on a shared parent,
+    # included in every sub-parser via `parents=[...]`, *and* kept on the
+    # top-level parser for the "--store X <cmd>" order too.
     store_parent = argparse.ArgumentParser(add_help=False)
     store_parent.add_argument("--store", default=DEFAULT_STORE, help="Vera store path")
+    store_parent.add_argument("--name", default=None, help="use a named, shared memory instead of --store")
     ap.add_argument("--store", default=DEFAULT_STORE, help="Vera store path")
+    ap.add_argument("--name", default=None, help="use a named, shared memory instead of --store")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -303,6 +361,13 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--local", default=".")
     p.add_argument("--remote", default="")
     p.set_defaults(fn=cmd_sync)
+
+    p = sub.add_parser("claim-name", help="name this memory so it can be resumed from anywhere", parents=[store_parent])
+    p.add_argument("claim_target", metavar="name")
+    p.set_defaults(fn=cmd_claim_name)
+
+    p = sub.add_parser("names", help="list every claimed memory name", parents=[store_parent])
+    p.set_defaults(fn=cmd_names)
 
     p = sub.add_parser("mcp", help="start the Vera MCP server", parents=[store_parent])
     p.set_defaults(fn=cmd_mcp)

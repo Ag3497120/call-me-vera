@@ -25,6 +25,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -145,6 +146,18 @@ BEGIN
     SELECT RAISE(ABORT, 'digests is append-only: DELETE is not permitted');
 END;
 
+-- One row: this store's name, if it has been given one (see claim_name()
+-- / vera_claim_name). A named store lives at a fixed, predictable path
+-- (see resolve_named_path()) so any session/app — regardless of which
+-- MCP registration or --store path it started with — can reconnect to
+-- the exact same memory by passing the same name, instead of needing to
+-- know a filesystem path.
+CREATE TABLE IF NOT EXISTS store_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    name TEXT,
+    named_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_event_log_turn ON event_log(turn_id);
 CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log(type);
 CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(created_at);
@@ -168,6 +181,106 @@ _EVENT_LOG_MIGRATIONS = [
 
 DEFAULT_TOKEN_THRESHOLD = 50_000  # conservative "getting risky for a fresh context" mark
 _CHARS_PER_TOKEN_ESTIMATE = 4     # rough, model-agnostic heuristic — not exact for any tokenizer
+
+# Central location for NAMED stores — the actual mechanism behind
+# "resume this memory from a different session/app": a name always
+# resolves to the same fixed path here, regardless of which MCP
+# registration or --store path any given connection started with. A
+# store reached this way (not via an explicit --store path) is how two
+# otherwise-unrelated registrations (say, Claude Desktop's default store
+# and a project-scoped one) end up sharing one memory on purpose.
+_NAMED_STORE_DIR = Path.home() / ".vera" / "stores"
+_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+def sanitize_name(name: str) -> Optional[str]:
+    """Validate a store name — filesystem-safe, short, no path traversal.
+    Returns the (trimmed) name if valid, None if not."""
+    name = (name or "").strip()
+    if not name or not _NAME_RE.match(name):
+        return None
+    return name
+
+
+def resolve_named_path(name: str) -> Path:
+    """The fixed path a given name always resolves to."""
+    _NAMED_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    return _NAMED_STORE_DIR / f"{name}.db"
+
+
+def list_named_stores() -> List[str]:
+    """Every name currently claimed, for a clear 'that name is taken'
+    message and for discovery."""
+    if not _NAMED_STORE_DIR.exists():
+        return []
+    return sorted(p.stem for p in _NAMED_STORE_DIR.glob("*.db"))
+
+
+def claim_name(current: "VeraStore", name: str) -> Dict[str, Any]:
+    """Give the CURRENT store a name so any other session/app can resume
+    it later via that name alone (resolve_named_path()), instead of
+    needing to know a filesystem path.
+
+    If the name is already claimed by a *different* store, this refuses
+    rather than silently merging into a stranger's memory — the exact
+    "this name can't be used" case. Re-claiming the same name for the
+    store that already owns it is a no-op success (idempotent). If the
+    name is free, a fresh named store is created at its fixed path and
+    everything from `current` is copied into it (via the existing,
+    append-only-safe sync() merge) — current's own content is untouched,
+    it simply also now lives at the named location."""
+    clean = sanitize_name(name)
+    if clean is None:
+        return {"error": f"invalid name {name!r} — use 1-64 letters/digits/-/_, starting with a letter or digit"}
+
+    target_path = resolve_named_path(clean)
+    current_path = current.db_path.resolve()
+
+    if target_path.resolve() == current_path:
+        # Already living at its own named path (e.g. re-claiming the name
+        # this exact store already has).
+        current.set_name(clean)
+        return {"name": clean, "path": str(target_path), "already_named": True}
+
+    if target_path.exists():
+        target = VeraStore(target_path)
+        try:
+            # Re-claiming a name `current` already pushed content into
+            # before (e.g. to sync newer entries up to the shared copy)
+            # must succeed, not read as a stranger's collision — checked
+            # by whether ANY of current's own event ids are already
+            # present in target, which only happens after a prior
+            # successful claim_name/sync of this exact store. An empty,
+            # never-claimed `current` has no ids to overlap, so it can
+            # never slip through this check by accident.
+            current_ids = [row[0] for row in current._conn.execute("SELECT id FROM event_log")]
+            already_merged = False
+            if current_ids:
+                placeholders = ",".join("?" * len(current_ids))
+                overlap = target._conn.execute(
+                    f"SELECT COUNT(*) FROM event_log WHERE id IN ({placeholders})",
+                    current_ids,
+                ).fetchone()[0]
+                already_merged = overlap > 0
+
+            if not already_merged:
+                return {
+                    "error": f"the name {clean!r} is already in use by a different memory store",
+                    "hint": f'to resume that one instead, call vera_session_start(name="{clean}")',
+                }
+            target.sync(current_path)
+            target.set_name(clean)
+        finally:
+            target.close()
+        return {"name": clean, "path": str(target_path), "already_named": True}
+
+    target = init_store(target_path)
+    try:
+        target.sync(current_path)
+        target.set_name(clean)
+    finally:
+        target.close()
+    return {"name": clean, "path": str(target_path), "already_named": False}
 
 
 def _time_bucket(iso_ts: str, seconds: int = 5) -> str:
@@ -238,6 +351,7 @@ class VeraStore:
             "INSERT OR IGNORE INTO session_control (id, paused, updated_at) VALUES (1, 0, ?)",
             (datetime.now(timezone.utc).isoformat(),),
         )
+        self._conn.execute("INSERT OR IGNORE INTO store_meta (id, name) VALUES (1, NULL)")
         self._conn.commit()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -312,6 +426,21 @@ class VeraStore:
         )
         self._conn.commit()
         return cid
+
+    @_locked
+    def get_name(self) -> str:
+        """This store's name, if it has one — see claim_name(). Empty
+        string if unnamed."""
+        row = self._conn.execute("SELECT name FROM store_meta WHERE id=1").fetchone()
+        return (row[0] or "") if row else ""
+
+    @_locked
+    def set_name(self, name: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "UPDATE store_meta SET name=?, named_at=? WHERE id=1", (name, now)
+        )
+        self._conn.commit()
 
     @_locked
     def is_paused(self) -> bool:
@@ -473,6 +602,7 @@ class VeraStore:
             (since_n, recent_n),
         ).fetchall()
         return {
+            "name": self.get_name(),
             "digest": (
                 {"id": digest_row[0], "ts": digest_row[1], "author": digest_row[2],
                  "lang": digest_row[3], "through_n": digest_row[4], "text": digest_row[5]}
@@ -566,6 +696,7 @@ class VeraStore:
         ).fetchone()[0]
         return {
             "session_id": self.session_id,
+            "name": self.get_name(),
             "state": "PAUSED" if self.is_paused() else "READY",
             "entries": n_entries,
             "authors": authors,

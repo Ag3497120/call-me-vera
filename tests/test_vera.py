@@ -19,8 +19,18 @@ import threading
 
 import pytest
 
+import vera.store as vera_store
 from vera.i18n import SUPPORTED_LANGUAGES, render_guide, render_project_state, resolve_lang
-from vera.store import VeraStore, init_store
+from vera.store import VeraStore, claim_name, init_store, list_named_stores, sanitize_name
+
+
+@pytest.fixture
+def named_dir(tmp_path, monkeypatch):
+    """Isolate the named-store registry from the real ~/.vera/stores for
+    the duration of a test."""
+    d = tmp_path / "named-stores"
+    monkeypatch.setattr(vera_store, "_NAMED_STORE_DIR", d)
+    return d
 
 
 @pytest.fixture
@@ -299,3 +309,104 @@ def test_guide_all_languages_render_and_are_current():
     assert resolve_lang("auf Deutsch bitte") == "de"
     assert resolve_lang("this is fine") == "en"  # "it" fragment must not falsely match Italian
     assert resolve_lang("history of this") == "en"  # "hi" fragment must not falsely match Hindi
+
+
+def test_claim_name_lets_a_different_store_resume_by_name(tmp_path, named_dir):
+    """The actual point of naming: a completely separate VeraStore
+    instance (a different process/session/app in practice) can resume
+    the exact same memory just by resolving the same name — this is the
+    fix for two MCP registrations with different --store paths otherwise
+    silently having disjoint memories."""
+    a = init_store(tmp_path / "a.db")
+    a.record_turn(author="claude", request="did project work", result="ok")
+
+    result = claim_name(a, "project-vera")
+    assert "error" not in result
+    assert result["name"] == "project-vera"
+
+    resumed = VeraStore(vera_store.resolve_named_path("project-vera"))
+    entries = resumed.get_project_state(recent_n=50)["recent_entries"]
+    assert resumed.get_name() == "project-vera"
+    assert any("did project work" in e["content"] for e in entries)
+    resumed.close()
+    a.close()
+
+
+def test_claim_name_is_idempotent_for_the_same_store(tmp_path, named_dir):
+    """Regression: re-claiming a name the CURRENT store already has (e.g.
+    to push newly recorded entries up to the shared named copy) must
+    succeed, not be misread as a collision with itself. Also verifies new
+    entries recorded after the first claim actually reach the named copy
+    on a second claim."""
+    a = init_store(tmp_path / "a.db")
+    a.record_turn(author="claude", request="first", result="ok")
+
+    r1 = claim_name(a, "project-vera")
+    assert "error" not in r1
+    r2 = claim_name(a, "project-vera")
+    assert "error" not in r2, f"re-claiming own name should succeed, got {r2}"
+
+    a.record_turn(author="claude", request="second", result="ok")
+    claim_name(a, "project-vera")
+
+    named = VeraStore(vera_store.resolve_named_path("project-vera"))
+    entries = named.get_project_state(recent_n=50)["recent_entries"]
+    assert any("second" in e["content"] for e in entries)
+    named.close()
+    a.close()
+
+
+def test_claim_name_refuses_real_collision(tmp_path, named_dir):
+    """A genuinely different store trying to claim an already-taken name
+    must be refused, with a hint to resume the existing one instead —
+    never silently merged into a stranger's memory."""
+    a = init_store(tmp_path / "a.db")
+    a.record_turn(author="claude", request="A content", result="ok")
+    claim_name(a, "project-vera")
+
+    b = init_store(tmp_path / "b.db")
+    b.record_turn(author="local", request="B content, unrelated", result="ok")
+    result = claim_name(b, "project-vera")
+
+    assert "error" in result
+    assert "hint" in result
+    a.close()
+    b.close()
+
+
+def test_claim_name_rejects_invalid_names(tmp_path, named_dir):
+    """Names must be filesystem-safe — no path traversal, no spaces/
+    special characters that could escape the named-store directory."""
+    a = init_store(tmp_path / "a.db")
+    assert sanitize_name("") is None
+    assert sanitize_name("has spaces") is None
+    assert sanitize_name("../../etc/passwd") is None
+    assert sanitize_name("ok-name_123") == "ok-name_123"
+    assert "error" in claim_name(a, "../escape")
+    a.close()
+
+
+def test_list_named_stores(tmp_path, named_dir):
+    """Every claimed name shows up for discovery."""
+    a = init_store(tmp_path / "a.db")
+    a.record_turn(author="claude", request="x", result="y")
+    assert list_named_stores() == []
+    claim_name(a, "alpha")
+    claim_name(a, "beta")  # a second name for the same underlying store — both should list
+    assert list_named_stores() == ["alpha", "beta"]
+    a.close()
+
+
+def test_session_start_prompts_for_a_name_when_fresh_and_unnamed(tmp_path):
+    """get_project_state() alone doesn't decide this (that's a CLI/MCP-
+    layer choice — see cmd_start / vera_session_start), but the
+    ingredients it must expose are correct: a brand-new store has no
+    name, no digest, and zero entries, which is exactly the condition
+    the CLI/MCP layer checks before showing the "name this memory" prompt
+    instead of an empty memory block."""
+    store = init_store(tmp_path / "fresh.db")
+    state = store.get_project_state()
+    assert state["name"] == ""
+    assert state["digest"] is None
+    assert state["size"]["uncompressed_entries"] == 0
+    store.close()

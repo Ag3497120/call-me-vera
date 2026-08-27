@@ -95,6 +95,28 @@ entry stays reachable with `vera lookup` — but a new session's starting
 context stays small: `vera start` shows the latest digest plus only
 what's been recorded since it, not the full history.
 
+## Resuming the same memory from a different session or app
+
+Every MCP registration/`--store` path is its own file by default — so
+Claude Desktop's default store and a project-scoped one are two separate
+memories unless you deliberately connect them. Naming a memory fixes
+that: a name always resolves to the same fixed location
+(`~/.vera/stores/<name>.db`) no matter which app, registration, or
+`--store` path started the connection.
+
+```bash
+vera claim-name project-vera        # name this session's current memory
+vera start --name project-vera      # from any OTHER session/app, same memory
+```
+
+Refuses if the name is already taken by a genuinely different memory
+(never silently merges into a stranger's data); re-claiming a name your
+own memory already has is a safe no-op, including pushing newly recorded
+entries up to the shared copy. `vera_session_start` on a brand-new,
+unnamed, empty memory asks the agent to get a name from the user instead
+of showing an empty block, and `vera guide`/`vera_guide` reminds you of
+the exact reconnect command whenever you pass the current session's name.
+
 ## Commands
 
 ```
@@ -108,10 +130,13 @@ vera compress --text "..."      store an AI-authored digest citing entry numbers
 vera pause / vera resume        stop/restart recording for a burst of activity
 vera stats                      entries, size vs. compression threshold, state
 vera sync --remote <path>       merge two independently-grown stores
+vera claim-name <name>          name this memory so any session/app can resume it
+vera names                      list every claimed memory name
 vera mcp                        start the MCP server
 ```
 
-Full reference: [docs/VERA_SESSION.md](docs/VERA_SESSION.md).
+Any command accepts `--name <N>` instead of `--store <path>` to operate on
+a named memory. Full reference: [docs/VERA_SESSION.md](docs/VERA_SESSION.md).
 
 ## Design
 
