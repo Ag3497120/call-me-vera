@@ -133,11 +133,31 @@ vera stats                      entries, size vs. compression threshold, state
 vera sync --remote <path>       merge two independently-grown stores
 vera claim-name <name>          name this memory so any session/app can resume it
 vera names                      list every claimed memory name
+vera portable-init <mount>      initialize a store on an external drive
 vera mcp                        start the MCP server
 ```
 
 Any command accepts `--name <N>` instead of `--store <path>` to operate on
 a named memory. Full reference: [docs/VERA_SESSION.md](docs/VERA_SESSION.md).
+
+## Shared memory on another Mac
+
+To carry the same memory between Macs on a USB or Thunderbolt drive, use an
+APFS-formatted drive and run:
+
+```bash
+./scripts/setup_shared_memory_mac.sh /Volumes/VeraMemory
+```
+
+Run the same command after mounting the drive on the other Mac. It creates
+the shared `.vera_store.db` on the drive and registers that path with the
+local Codex. See [docs/SHARED_MEMORY.md](docs/SHARED_MEMORY.md) for the
+single-mount safety rule and manual setup.
+
+To create a self-contained USB installer from this checkout, run
+`vera portable-export /Volumes/VeraMemory`. It creates
+`Vera Shared Memory/Vera Setup.command`; double-click that file on another
+Mac to configure the local MCP clients and use the shared database.
 
 ## Design
 

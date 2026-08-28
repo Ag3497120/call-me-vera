@@ -17,6 +17,8 @@ Subcommands:
   vera sync --remote <path>         merge two independently-grown stores
   vera claim-name <name>            name this memory so any session/app can resume it
   vera names                        list every claimed memory name
+  vera portable-init <mount>       initialize a store on an external drive
+  vera portable-export <mount>    put a double-click installer on the drive
   vera mcp                          start the MCP server
 
 Any command above also accepts --name <N> instead of --store <path> — this
@@ -51,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -252,6 +255,89 @@ def cmd_names(args) -> int:
     return 0
 
 
+def cmd_portable_init(args) -> int:
+    """Initialize a store on an already-mounted external drive."""
+    from .store import init_store
+
+    mount = Path(args.mount).expanduser()
+    if not mount.exists() or not mount.is_dir():
+        print(f"mount point does not exist or is not a directory: {mount}")
+        return 1
+    store_path = mount / (args.filename or ".vera_store.db")
+    store = init_store(store_path)
+    store.close()
+    _print({
+        "init": True,
+        "portable": True,
+        "mount": str(mount.resolve()),
+        "path": str(store_path.resolve()),
+        "next": f"vera mcp --store {store_path.resolve()}",
+    })
+    return 0
+
+
+def cmd_portable_export(args) -> int:
+    """Create a self-contained, double-clickable setup bundle on a drive."""
+    from .store import init_store
+
+    mount = Path(args.mount).expanduser()
+    if not mount.exists() or not mount.is_dir():
+        print(f"mount point does not exist or is not a directory: {mount}")
+        return 1
+    bundle = mount / (args.folder or "Vera Shared Memory")
+    repo_copy = bundle / "call-me-vera"
+    if bundle.exists() and not args.force:
+        print(f"destination already exists (use --force only if intended): {bundle}")
+        return 1
+    if bundle.exists():
+        shutil.rmtree(bundle)
+    bundle.mkdir(parents=True)
+
+    source = Path(__file__).resolve().parent.parent
+    ignored = shutil.ignore_patterns(
+        ".git", ".venv", ".venv312", "__pycache__", ".pytest_cache",
+        "*.pyc", ".vera_store.db", ".vera_store.db-wal", ".vera_store.db-shm",
+    )
+    shutil.copytree(source, repo_copy, ignore=ignored)
+    store_path = bundle / ".vera_store.db"
+    store = init_store(store_path)
+    imported = {"inserted": 0, "conflicts": 0, "updated": 0}
+    current_path = Path.cwd() / DEFAULT_STORE
+    if current_path.exists() and current_path.resolve() != store_path.resolve():
+        imported = store.sync(current_path)
+    store.close()
+
+    setup = bundle / "Vera Setup.command"
+    setup.write_text(
+        "#!/bin/sh\nset -eu\n"
+        "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
+        "set +e\n"
+        "\"$ROOT/call-me-vera/scripts/setup_shared_memory_mac.sh\" \"$ROOT\"\n"
+        "status=$?\necho\necho \"Vera setup finished with status $status. You can close this window.\"\n"
+        "read -r _ || true\nexit $status\n",
+        encoding="utf-8",
+    )
+    setup.chmod(setup.stat().st_mode | 0o111)
+    windows_setup = bundle / "Vera Setup.cmd"
+    windows_setup.write_text(
+        "@echo off\r\n"
+        "set ROOT=%~dp0\r\n"
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%ROOT%call-me-vera\\scripts\\setup_shared_memory_windows.ps1\"\r\n"
+        "if errorlevel 1 pause\r\n",
+        encoding="utf-8",
+    )
+    _print({
+        "exported": True,
+        "bundle": str(bundle.resolve()),
+        "store": str(store_path.resolve()),
+        "imported": imported,
+        "double_click": str(setup.resolve()),
+        "windows_double_click": str(windows_setup.resolve()),
+        "next": "On another Mac, double-click Vera Setup.command on the drive.",
+    })
+    return 0
+
+
 def cmd_mcp(args) -> int:
     """Start the Vera MCP server. With --name, the server's own default
     store IS the named memory (~/.vera/stores/<name>.db) — every tool
@@ -357,6 +443,25 @@ def main(argv: Optional[list] = None) -> int:
 
     p = sub.add_parser("names", help="list every claimed memory name", parents=[store_parent])
     p.set_defaults(fn=cmd_names)
+
+    p = sub.add_parser(
+        "portable-init",
+        help="initialize a store on an already-mounted external drive",
+        parents=[store_parent],
+    )
+    p.add_argument("mount", help="existing USB/Thunderbolt mount directory")
+    p.add_argument("--filename", default=".vera_store.db", help="database filename on the drive")
+    p.set_defaults(fn=cmd_portable_init)
+
+    p = sub.add_parser(
+        "portable-export",
+        help="put a self-contained double-click installer on an external drive",
+        parents=[store_parent],
+    )
+    p.add_argument("mount", help="existing USB/Thunderbolt mount directory")
+    p.add_argument("--folder", default="Vera Shared Memory", help="folder name on the drive")
+    p.add_argument("--force", action="store_true", help="replace the named folder")
+    p.set_defaults(fn=cmd_portable_export)
 
     p = sub.add_parser("mcp", help="start the Vera MCP server", parents=[store_parent])
     p.set_defaults(fn=cmd_mcp)
